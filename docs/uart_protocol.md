@@ -16,9 +16,9 @@ MCU to host (12 bytes):
 
 | Byte offset | Type | Meaning |
 |---|---|---|
-| 0–3 | 32-bit float | Motor angle |
-| 4–7 | 32-bit float | Pendulum angle |
-| 8–11 | 32-bit float | Measured current |
+| 0–3 | 32-bit float | Motor angle in radians |
+| 4–7 | 32-bit float | Pendulum angle in radians |
+| 8–11 | 32-bit float | Measured current in amperes |
 
 Both ends use little-endian IEEE-754 floats. The host copies individual float
 bytes rather than transmitting padded C++ structs. It requires a little-endian
@@ -29,17 +29,23 @@ bytes can destroy alignment; the host does not attempt automatic resynchronizati
 
 ## Timing
 
-The intended host communication rate is 500 Hz (2 ms). The existing MCU uses a
+The intended host communication rate is 200 Hz (5 ms). The existing MCU uses a
 200 µs communication polling ticker and a separate 50 µs current-control ticker.
 These faster MCU loops are intentional and remain unchanged. The MCU responds
 when it receives a command; its polling rate is not the UART transaction rate.
 
-The imported host sends an initial command, waits for a complete response, then
-sends its next command. It does not enforce a 2 ms period. The 500 Hz constant
-only sets the displayed expected rate. When sample output is enabled, packet-to-packet time is measured using
+The host sends an initial disabled command and waits for a complete response.
+It then sends enabled 0.05 A commands, waiting until at least 5 ms after the
+previous command start before each send. Late cycles do not trigger catch-up
+bursts. The pacing runs even when sample printing is disabled.
+When sample output is enabled, packet-to-packet time is measured using
 `std::chrono::steady_clock` after each complete response, so it includes serial
 transfer and scheduling effects. Hardware validation is needed to establish the
 actual rate and jitter.
+
+The displayed `current_cmd` and `enable` describe the command sent before the
+reported response. The measured current is a separate MCU sensor value and is
+not expected to match the command exactly at every sample.
 
 ## Failures
 
@@ -52,5 +58,6 @@ call; Linux writes have no explicit timeout. This is not a hard real-time deadli
 
 The MCU contains a nominal 0.3 s communication watchdog. This is firmware behavior,
 not a host shutdown guarantee: the MCU's blocking receive of an incomplete command
-can prevent its watchdog counter from advancing. The initial host always sends
-disabled commands. Firmware behavior and the protocol are unchanged by this migration.
+can prevent its watchdog counter from advancing. Only the startup command is
+disabled; the subsequent constant-current test enables the motor. Firmware
+behavior and the protocol are unchanged by this host test.

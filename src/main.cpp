@@ -19,7 +19,7 @@
 namespace
 {
 constexpr std::uint32_t BAUD = 115200;
-constexpr double COMMUNICATION_FREQUENCY_HZ = 500.0;
+constexpr double COMMUNICATION_FREQUENCY_HZ = 200.0;
 constexpr double EXPECTED_PERIOD_MS = 1000.0 / COMMUNICATION_FREQUENCY_HZ;
 
 struct Command
@@ -75,9 +75,8 @@ Command controller(const Measurements& measurements)
 {
     (void)measurements;
 
-    // TODO: implement the host-side controller.
-    // Safe default: motor disabled, zero current command.
-    return {};
+    // Constant-current test; startup still uses the disabled Command defaults.
+    return {0.05f, true};
 }
 
 void communicationLoop(const std::string& port_name)
@@ -102,11 +101,16 @@ void communicationLoop(const std::string& port_name)
 
     std::cout << "Expected communication rate: "
               << COMMUNICATION_FREQUENCY_HZ << " Hz ("
-              << EXPECTED_PERIOD_MS << " ms)\n";
+              << EXPECTED_PERIOD_MS << " ms)" << std::endl;
 
     // Prime communication with a safe command.
     Command command{};
     encodeCommand(command, tx);
+
+    using clock = std::chrono::steady_clock;
+    const auto communication_period = std::chrono::duration_cast<clock::duration>(
+        std::chrono::duration<double>(1.0 / COMMUNICATION_FREQUENCY_HZ));
+    auto last_send_time = clock::now();
 
     if (!serial.writeExact(tx.data(), tx.size())) {
         std::cerr << "Initial UART write failed.\n";
@@ -115,7 +119,6 @@ void communicationLoop(const std::string& port_name)
 
 #ifdef UART_HOST_PRINT_SAMPLES
     static_assert(UART_HOST_PRINT_EVERY_N > 0, "Print interval must be positive.");
-    using clock = std::chrono::steady_clock;
     clock::time_point previous_time{};
     bool first_sample = true;
     unsigned sample_count = 0;
@@ -156,7 +159,9 @@ void communicationLoop(const std::string& port_name)
             std::cout
                 << "motor_angle=" << measurements.motor_angle
                 << "  pendulum_angle=" << measurements.pendulum_angle
-                << "  current=" << measurements.current;
+                << "  current=" << measurements.current
+                << "  current_cmd=" << command.current_cmd
+                << "  enable=" << command.enable;
             // The first received sample has no packet-to-packet interval.
             if (dt_count > 0) {
                 std::cout
@@ -164,7 +169,7 @@ void communicationLoop(const std::string& port_name)
                     << " ms  dt_min=" << dt_min_ms
                     << " ms  dt_max=" << dt_max_ms << " ms";
             }
-            std::cout << '\n';
+            std::cout << std::endl; // Flush each report on both Linux and Windows.
             sample_count = 0;
             dt_count = 0;
             dt_sum_ms = 0.0;
@@ -175,6 +180,9 @@ void communicationLoop(const std::string& port_name)
         encodeCommand(command, tx);
 
         // Send the next command; the MCU processes it when available.
+        // Space command starts by at least 5 ms. Late cycles do not trigger catch-up bursts.
+        std::this_thread::sleep_until(last_send_time + communication_period);
+        last_send_time = clock::now();
         if (!serial.writeExact(tx.data(), tx.size())) {
             std::cerr << "UART write failed.\n";
             return;
