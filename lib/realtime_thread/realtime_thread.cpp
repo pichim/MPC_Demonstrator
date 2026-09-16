@@ -1,4 +1,5 @@
 #include "realtime_thread.h"
+#include "config.h"
 
 #include <cstdint>
 #include <cstring>
@@ -7,7 +8,7 @@ realtime_thread::realtime_thread(IO_handler &io, float Ts, float Ts_fast)
     : thread(osPriorityHigh1, OS_STACK_SIZE)
     , Ts(Ts)
     , io_handler(io)
-    , serialPipe(USBTX, USBRX, BAUD, 8, 5)
+    , serialPipe(MPC_UART_TX_PIN, MPC_UART_RX_PIN, MPC_UART_BAUD, 8, 5)
     , fast_rt_thread(io, Ts_fast)
     // , m_SerialStream(PB_10, PC_5, 30, 2000000)
     // , m_Chirp(F0_HZ, (1.0f / 2.0f) / Ts, T1_SEC, Ts)
