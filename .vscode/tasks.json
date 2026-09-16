@@ -1,0 +1,26 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "shell",
+			"label": "Mount NUCLEO",
+			"command": "device=$(find /dev/disk/by-id -maxdepth 1 -type l -name 'usb-MBED_microcontroller_*-0:0' -print -quit); if [[ -z \"$device\" ]]; then echo 'No NUCLEO MBED drive found.' >&2; exit 1; fi; findmnt --noheadings --source \"$(readlink -f \"$device\")\" > /dev/null || udisksctl mount -b \"$device\"",
+			"problemMatcher": []
+		},
+		{
+			"type": "cmake",
+			"label": "CMake: build",
+			"command": "build",
+			"targets": [
+				"flash-MPC_Demonstrator"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"dependsOn": "Mount NUCLEO",
+			"problemMatcher": [],
+			"detail": "CMake template build task"
+		}
+	]
+}
