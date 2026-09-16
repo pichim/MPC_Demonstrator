@@ -3,9 +3,10 @@
 
 #include "mbed.h"
 
-// UART communication with Raspberry Pi (NUCLEO-F446RE USART3).
-#define MPC_UART_TX_PIN PC_10 // CN7 pin 1 -> Pi physical pin 10 (RX)
-#define MPC_UART_RX_PIN PC_11 // CN7 pin 2 <- Pi physical pin 8 (TX)
-#define MPC_UART_BAUD 230400   // Must match the host BAUD setting.
+// SPI2 slave communication with Raspberry Pi SPI0 (mode 0)
+#define MPC_SPI_MOSI_PIN PC_3
+#define MPC_SPI_MISO_PIN PC_2
+#define MPC_SPI_SCK_PIN PB_10
+#define MPC_SPI_NSS_PIN PB_12
 
 #endif /* MPC_CONFIG_H_ */

@@ -1,45 +1,69 @@
-# MPC Demonstrator — MCU
+# MPC Demonstrator — SPI MCU
 
-Mbed CE firmware for **NUCLEO-F446RE**. The Pi host communicates over USART3
-at **230400 baud**. ST-LINK USB remains available for power and flashing.
+NUCLEO-F446RE firmware with a Raspberry Pi SPI master. The existing 50 µs
+current-control loop is unchanged; the communication loop checks new SPI commands
+every 200 µs. Pins are in `include/config.h`.
 
-## Configuration and wiring
+## Wiring
 
-`include/config.h` defines `MPC_UART_TX_PIN` (PC10), `MPC_UART_RX_PIN` (PC11)
-and `MPC_UART_BAUD` (230400). The host must use the same baud rate.
+Power off before rewiring. Use short 3.3 V signal wires and common ground;
+connect no power pins between boards. Keep ST-LINK USB for power/flashing.
+The old PC10/PC11 UART wires are no longer used for commands.
 
-| Pi 5 physical pin | Nucleo CN7 pin |
-|---|---|
-| 8 — GPIO14 TX | 2 — PC11 RX |
-| 10 — GPIO15 RX | 1 — PC10 TX |
-| 6 — GND | 8 — GND |
+| Pi 5 physical pin | Signal | Nucleo-F446RE |
+|---|---|---|
+| 19 (GPIO10) | MOSI | PC3 — CN7 pin 37 |
+| 21 (GPIO9) | MISO | PC2 — CN7 pin 35 |
+| 23 (GPIO11) | SCK | PB10 — CN10 pin 25 |
+| 24 (GPIO8 / CE0) | NSS | PB12 — CN10 pin 16 |
+| 6 | GND | CN7 pin 8 |
 
-Wire with power off, use 3.3 V logic, and connect no power pins between boards.
-The host README describes Pi UART setup. To use ST-LINK serial instead, change
-the pin macros to `USBTX`/`USBRX`, set `MPC_UART_BAUD` to 115200, and set the
-Host `BAUD` to 115200 as well. Rebuild both programs and reflash the MCU.
+Pin reference: [ST UM1724](https://www.st.com/resource/en/user_manual/dm00105823.pdf).
 
-## Build and flash
+## Build and run
 
-With the existing configured Arm/Mbed CE toolchain:
+With the existing Arm/Mbed CE toolchain:
 
 ```sh
+cmake -S . -B build/NUCLEO_F446RE-Develop
 cmake --build build/NUCLEO_F446RE-Develop --target MPC_Demonstrator -j2
 ```
 
-Flash `build/NUCLEO_F446RE-Develop/MPC_Demonstrator.bin` onto the Nucleo's
-`NOD_F446RE` drive, or use the existing VS Code build/flash task. Stop the host
-before flashing. Building alone does not flash the board.
+Flash `build/NUCLEO_F446RE-Develop/MPC_Demonstrator.bin` using the existing VS Code
+flash task or copy it onto the `NOD_F446RE` drive. Stop clients before flashing.
 
-## Behavior
+Enable Pi SPI0 (`dtparam=spi=on` in the active boot `config.txt`, reboot if changed),
+check `/dev/spidev0.0`, and install `python3-spidev` if needed. From this MCU repository:
 
-The communication ticker is 200 µs; the current-control ticker is 50 µs.
-The host targets 500 Hz, initially commanding 0 A disabled, then 0.05 A enabled.
-UART uses 8N1, no flow control and little-endian 32-bit floats:
+```sh
+cd ~/Mbed_CE_Programs/MPC_Demonstrator
+sudo chrt -f 50 python3 -u python/main.py 2>&1 | tee spi_timing.txt
+```
 
-- Request: current command float + enable byte (5 bytes).
-- Response: motor angle, pendulum angle and current floats (12 bytes).
+The client targets **500 Hz** (2 ms), SPI mode 0 at **5 MHz**. It first sends 0 A disabled,
+then **0.08 A enabled** after a valid reply. Settings are at the top of
+`python/main.py`. Ctrl+C or a bad reply attempts a final disable and closes SPI;
+this is not an acknowledgement that the motor stopped. No CPU pinning is used.
 
-Packets have no framing/CRC or command range validation. A partial command can
-block reception and stall the nominal 0.3 s watchdog. Ctrl+C on the host sends
-no final disable command. The motor fault input is currently unused.
+## Protocol
+
+Both transfers are 14 bytes: header + three little-endian float32 values + CRC-8
+(poly 0x07, initial value 0, over header and payload). The Pi sends an ARM frame
+(0x56, zero payload), waits at least 100 µs, then a command frame (0x55).
+
+- Command floats: current in A, enable (exactly 0 or 1), reserved zero.
+- Reply header 0x45; floats: motor angle in rad, pendulum angle in rad, current in A.
+
+Replies contain previously prepared measurements, not command acknowledgements;
+there is no sequence number or measurement timestamp. The fixed rearm gap needs
+hardware validation. Only CRC-valid commands with finite current, enable 0 or 1, and reserved zero refresh the
+elapsed-time 0.3 s watchdog. Invalid command payloads disable the motor; missing
+or corrupt frames eventually expire the watchdog. A stalled MCU task can still
+delay shutdown.
+
+Every 10 exchanges the client prints telemetry and arrival interval statistics.
+Printing and Linux scheduling can extend the period. The two transfers plus the 100 µs gap take at least
+144.8 µs at the requested clock, before Python/driver overhead; 500 Hz is an
+experimental target, not a guaranteed rate. Firmware builds and mocked
+client checks do not validate electrical operation or physical timing. `realtime_thread` uses SPI; the UART helper libraries remain available.
+The separate host repository retains the C++ UART client for use with UART firmware.

@@ -8,7 +8,7 @@
 #include "ThreadFlag.h"
 #include "fast_realtime_thread.h"
 #include "mbed.h"
-#include "serial_pipe.h"
+#include "SPISlaveDMA.h"
 
 #define WATCHDOG_TIMEOUT_SEC 0.3f // Watchdog timeout in seconds
 // #define F0_HZ 0.05f
@@ -30,7 +30,7 @@ private:
     ThreadFlag threadFlag;
     float Ts;
     IO_handler &io_handler;
-    SerialPipe serialPipe;
+    SpiSlaveDMA spi;
     fast_realtime_thread fast_rt_thread;
 
     // SerialStream m_SerialStream;
