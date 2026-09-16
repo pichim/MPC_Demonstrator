@@ -1,7 +1,8 @@
 # UART protocol and timing
 
-This host preserves the existing MCU wire format: 115200 baud, 8 data bits,
-no parity, one stop bit, and no flow control.
+The GPIO UART connection uses 230400 baud, 8 data bits,
+no parity, one stop bit, and no flow control. Both host and MCU must use this
+baud rate. Packet layout is unchanged.
 
 ## Packets
 
@@ -29,13 +30,13 @@ bytes can destroy alignment; the host does not attempt automatic resynchronizati
 
 ## Timing
 
-The intended host communication rate is 200 Hz (5 ms). The existing MCU uses a
+The intended host communication rate is 500 Hz (2 ms). The existing MCU uses a
 200 µs communication polling ticker and a separate 50 µs current-control ticker.
 These faster MCU loops are intentional and remain unchanged. The MCU responds
 when it receives a command; its polling rate is not the UART transaction rate.
 
 The host sends an initial disabled command and waits for a complete response.
-It then sends enabled 0.05 A commands, waiting until at least 5 ms after the
+It then sends enabled 0.05 A commands, waiting until at least 2 ms after the
 previous command start before each send. Late cycles do not trigger catch-up
 bursts. The pacing runs even when sample printing is disabled.
 When sample output is enabled, packet-to-packet time is measured using
@@ -51,10 +52,9 @@ not expected to match the command exactly at every sample.
 
 The serial implementation uses a 20 ms read timeout for each underlying wait/read,
 not a single deadline covering the entire packet. Partial reads are accumulated.
-Linux waits for readable data with `poll`; Windows waits for the requested bytes
-or the per-call timeout with `ReadFile`. Reported serial errors or a read timeout
-stop the communication loop. Windows writes have a 20 ms timeout per `WriteFile`
-call; Linux writes have no explicit timeout. This is not a hard real-time deadline.
+Linux waits for readable data with `poll`. Reported serial errors or a read
+timeout stop the communication loop. Writes have no explicit timeout. This is
+not a hard real-time deadline.
 
 The MCU contains a nominal 0.3 s communication watchdog. This is firmware behavior,
 not a host shutdown guarantee: the MCU's blocking receive of an incomplete command

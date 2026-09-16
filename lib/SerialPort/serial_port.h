@@ -26,9 +26,5 @@ public:
     bool readExact(void* data, std::size_t size);
 
 private:
-#ifdef _WIN32
-    void* handle_ = reinterpret_cast<void*>(-1);
-#else
     int fd_ = -1;
-#endif
 };

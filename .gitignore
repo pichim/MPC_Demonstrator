@@ -3,4 +3,4 @@
 /build-*/
 
 # UART timing capture (see README)
-/uart_timing.txt
+/uart_timing*.txt
