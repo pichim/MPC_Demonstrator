@@ -67,3 +67,6 @@ Printing and Linux scheduling can extend the period. The two transfers plus the 
 experimental target, not a guaranteed rate. Firmware builds and mocked
 client checks do not validate electrical operation or physical timing. `realtime_thread` uses SPI; the UART helper libraries remain available.
 The separate host repository retains the C++ UART client for use with UART firmware.
+
+
+This repository is going to be modified for MPC control. PI current controller still on the main branch. 
