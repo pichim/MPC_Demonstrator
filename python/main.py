@@ -4,16 +4,15 @@ import struct
 import sys
 import time
 
-SPI_HEADER_ARM = 0x56
+SPI_HEADER_READ = 0x57
 SPI_HEADER_COMMAND = 0x55
 SPI_HEADER_REPLY = 0x45
 SPI_NUM_FLOATS = 3
 SPI_MSG_SIZE = 14
-SPI_SPEED_HZ = 5_000_000
-PERIOD_S = 1 / 500
-ARM_GAP_S = 100e-6
+SPI_SPEED_HZ = 30_000_000
+PERIOD_S = 1 / 1e3
 CURRENT_A = 0.08
-PRINT_EVERY = 10
+PRINT_EVERY = 500  # Set to 0 to disable periodic printing and interval collection.
 
 
 CRC8_TAB = [
@@ -47,17 +46,10 @@ def frame(header, values):
     return data + bytes([crc8(data)])
 
 
-ARM_FRAME = frame(SPI_HEADER_ARM, (0.0, 0.0, 0.0))
+READ_FRAME = frame(SPI_HEADER_READ, (0.0, 0.0, 0.0))
 
 
-def exchange(spi, current, enable):
-    spi.xfer2(list(ARM_FRAME))
-    # Give the MCU worker time to prepare and re-arm DMA. This is not a ready ACK.
-    deadline = time.perf_counter() + ARM_GAP_S
-    while time.perf_counter() < deadline:
-        pass
-    reply = bytes(spi.xfer2(list(frame(SPI_HEADER_COMMAND,
-                                      (current, float(enable), 0.0)))))
+def decode_reply(reply):
     if (len(reply) != SPI_MSG_SIZE or reply[0] != SPI_HEADER_REPLY
             or crc8(reply[:-1]) != reply[-1]):
         raise RuntimeError('Invalid SPI reply (length/header/CRC); stopping.')
@@ -67,23 +59,41 @@ def exchange(spi, current, enable):
     return values
 
 
+def read_measurements(spi):
+    return decode_reply(spi.transfer(READ_FRAME))
+
+
+def send_command(spi, current, enable):
+    # Reply is prepared before receipt of this command; not an application ACK.
+    return decode_reply(spi.transfer(frame(SPI_HEADER_COMMAND, (current, float(enable), 0.0))))
+
+
+def exchange(spi, current, enable):
+    measurements = read_measurements(spi)
+    send_command(spi, current, enable)
+    return measurements
+
+
 def run(spi):
     previous = None
     intervals = []
     count = 0
     enabled = False
     print(f'SPI: {SPI_SPEED_HZ} Hz, mode 0, {SPI_MSG_SIZE}-byte frames; '
-          f'target {1 / PERIOD_S:g} Hz ({PERIOD_S * 1000:g} ms)', flush=True)
+          f'NSS; target {1 / PERIOD_S:g} Hz ({PERIOD_S * 1000:g} ms)', flush=True)
     while True:
         start = time.perf_counter()
+        motor, pendulum, measured_current = read_measurements(spi)
+        # Future controller computation belongs here, after receiving sensors.
         current = CURRENT_A if enabled else 0.0
-        motor, pendulum, measured_current = exchange(spi, current, enabled)
+        send_command(spi, current, enabled)
         now = time.perf_counter()
-        if previous is not None:
-            intervals.append((now - previous) * 1000)
-        previous = now
+        if PRINT_EVERY > 0:
+            if previous is not None:
+                intervals.append((now - previous) * 1000)
+            previous = now
         count += 1
-        if count % PRINT_EVERY == 0:
+        if PRINT_EVERY > 0 and count % PRINT_EVERY == 0:
             timing = (f'  dt_avg={sum(intervals)/len(intervals):.6f} ms'
                       f'  dt_min={min(intervals):.6f} ms'
                       f'  dt_max={max(intervals):.6f} ms') if intervals else ''
@@ -99,14 +109,10 @@ def run(spi):
 
 
 def main():
-    import spidev
-    spi = spidev.SpiDev()
-    spi.open(0, 0)
+    from spi_nss import NssSPI
+    spi = NssSPI(SPI_SPEED_HZ)
     status = 0
     try:
-        spi.max_speed_hz = SPI_SPEED_HZ
-        spi.mode = 0
-        spi.bits_per_word = 8
         run(spi)
     except KeyboardInterrupt:
         pass
@@ -115,7 +121,7 @@ def main():
         status = 1
     finally:
         try:
-            exchange(spi, 0.0, False)
+            send_command(spi, 0.0, False)
         except (OSError, RuntimeError, KeyboardInterrupt) as error:
             print(f'Final disable unconfirmed: {error}', file=sys.stderr, flush=True)
         spi.close()

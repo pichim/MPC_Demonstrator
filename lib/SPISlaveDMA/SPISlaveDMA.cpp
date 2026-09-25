@@ -3,8 +3,6 @@
 // Keep HAL SPI MSP init empty; class configures pins/clocks/DMA itself.
 extern "C" void HAL_SPI_MspInit(SPI_HandleTypeDef* hspi) { (void)hspi; }
 
-// Definition for the C++14-friendly constexpr static member
-constexpr std::chrono::microseconds SpiSlaveDMA::TC_WAIT_BUDGET;
 
 // ============================ CRC-8 (poly 0x07) ==============================
 static const uint8_t CRC8_TAB[256] = {
@@ -71,18 +69,19 @@ SpiSlaveDMA::SpiSlaveDMA(PinName mosi,
                          PinName miso,
                          PinName sck,
                          PinName nss,
+                         uint32_t transaction_timeout_us,
                          osPriority priority,
                          uint32_t stack_size)
     : m_Thread(priority, stack_size)
     , m_InterruptIn_NSS(nss)
+    , m_transaction_timeout_us(transaction_timeout_us)
     , m_MOSI(mosi)
     , m_MISO(miso)
     , m_SCK(sck)
     , m_NSS(nss)
     , m_instance(inferInstance(mosi, miso, sck, nss))
 {
-    m_Timer.start();
-    m_time_previous = m_Timer.elapsed_time();
+    m_time_previous = us_ticker_read();
 
     std::memset(&m_hspi, 0, sizeof(m_hspi));
     // Instance set in configureGPIOandDMA() just before HAL_SPI_Init
@@ -143,149 +142,126 @@ SpiSlaveDMA::Instance SpiSlaveDMA::inferInstance(PinName mosi, PinName miso, Pin
 }
 
 SpiSlaveDMA::~SpiSlaveDMA() {
-    HAL_SPI_DMAStop(&m_hspi);
     m_InterruptIn_NSS.rise(nullptr);
+    m_InterruptIn_NSS.fall(nullptr);
     m_Thread.terminate();
+    HAL_SPI_DMAStop(&m_hspi);
 }
 
 bool SpiSlaveDMA::start() {
     MBED_ASSERT(validatePins());
+    MBED_ASSERT(m_transaction_timeout_us > 0);
+    m_InterruptIn_NSS.rise(callback(this, &SpiSlaveDMA::handleNss));
+    m_InterruptIn_NSS.fall(callback(this, &SpiSlaveDMA::handleNss));
+    const uint32_t line = static_cast<uint32_t>(m_NSS) & 15U;
+    const IRQn_Type irq = line < 5 ? static_cast<IRQn_Type>(static_cast<int>(EXTI0_IRQn)+line)
+        : (line < 10 ? EXTI9_5_IRQn : EXTI15_10_IRQn);
+    NVIC_SetPriority(irq, 5);
+    configureGPIOandDMA();
+    if (HAL_SPI_Init(&m_hspi) != HAL_OK) return false;
+    return m_Thread.start(callback(this, &SpiSlaveDMA::threadTask)) == osOK;
+}
 
-    // attach wakeup FIRST (configures EXTI), before AF is applied
-    m_InterruptIn_NSS.rise(callback(this, &SpiSlaveDMA::sendThreadFlag));
+void SpiSlaveDMA::setReplyData(float motor_angle, float pendulum_angle, float current) {
+    const float values[SPI_NUM_FLOATS] = {motor_angle, pendulum_angle, current};
+    core_util_critical_section_enter();
+    std::memcpy(m_reply_data, values, sizeof(values));
+    core_util_critical_section_exit();
+}
 
-    // Ensure EXTI IRQ for our NSS line runs at a sensible priority.
-    // Note: smaller number = higher priority (Cortex-M). 5 is a safe default under Mbed RTOS.
-    IRQn_Type nss_irq = EXTI15_10_IRQn;
-    if      (m_NSS == PB_12 || m_NSS == PA_15) { nss_irq = EXTI15_10_IRQn; }
-    else if (m_NSS == PB_9)                    { nss_irq = EXTI9_5_IRQn;   }
-    else if (m_NSS == PA_4)                    { nss_irq = EXTI4_IRQn;     }
-    NVIC_SetPriority(nss_irq, 5);
-    // (Do not call NVIC_EnableIRQ here; InterruptIn already enables the line.)
-
-    configureGPIOandDMA();                        // sets AF on pins
-    if (HAL_SPI_Init(&m_hspi) != HAL_OK) {
-        m_InterruptIn_NSS.rise(nullptr);
-        return false;
+bool SpiSlaveDMA::takeCommand(SpiCommand &command) {
+    core_util_critical_section_enter();
+    const bool available = m_has_new_data;
+    if (available) {
+        command = m_command;
+        m_has_new_data = false;
     }
-
-    buildTX();
-    if (tryArmDmaFrame()) {
-        if (m_Thread.start(callback(this, &SpiSlaveDMA::threadTask)) == osOK)
-            return true;
-        HAL_SPI_DMAStop(&m_hspi);
-        return false;
-    }
-
-    printf("[%-4s] Initial arm failed ...\n", instanceName());
-    return false;
-}
-
-void SpiSlaveDMA::setReplyData(float f0, float f1, float f2) {
-    const float tmp[3] = {f0, f1, f2};
-    (void)setReplyData(tmp, 3);
-}
-
-bool SpiSlaveDMA::setReplyData(size_t index, float value) {
-    if (index >= SPI_NUM_FLOATS) return false;
-    core_util_critical_section_enter();
-    m_reply_data[index] = value;
     core_util_critical_section_exit();
-    return true;
+    return available;
 }
 
-size_t SpiSlaveDMA::setReplyData(const float* src, size_t count, size_t dest_offset) {
-    if (!src || dest_offset >= SPI_NUM_FLOATS || count == 0) return 0;
-    const size_t max_copy = SPI_NUM_FLOATS - dest_offset;
-    const size_t n = (count < max_copy) ? count : max_copy;
-
+SpiDiagnostics SpiSlaveDMA::getDiagnostics() {
     core_util_critical_section_enter();
-    std::memcpy(&m_reply_data[dest_offset], src, n * sizeof(float));
+    const SpiDiagnostics result = m_diagnostics;
     core_util_critical_section_exit();
-
-    return n;
+    return result;
 }
 
-SpiData SpiSlaveDMA::getSPIData() {
-    core_util_critical_section_enter();
-    SpiData out = m_SPIData;
-    m_has_new_data = false;
-    core_util_critical_section_exit();
-    return out;
-}
-
-// ============================ Private: worker =================================
-
+// The ISR owns normal transfers. Recover state excludes it while the worker
+// performs potentially blocking HAL recovery. Critical sections claim ownership.
 void SpiSlaveDMA::threadTask() {
     while (true) {
-        ThisThread::flags_wait_any(m_ThreadFlag);
-
-        const microseconds t0 = m_Timer.elapsed_time();
-
-        bool rx_done = false, tx_done = false;
-        const microseconds deadline = t0 + TC_WAIT_BUDGET;
-        do {
-            rx_done = (__HAL_DMA_GET_FLAG(&m_dma_rx, m_rx_tc_flag) != 0U);
-            tx_done = (__HAL_DMA_GET_FLAG(&m_dma_tx, m_tx_tc_flag) != 0U);
-            if (rx_done && tx_done) break;
-        } while (m_Timer.elapsed_time() < deadline);
-
-        if (!(rx_done && tx_done)) {
-            core_util_critical_section_enter();
-            m_SPIData.failed_count++;
-            core_util_critical_section_exit();
-
-            // Stop DMA before rebuilding buffers after an incomplete transfer.
-            HAL_SPI_DMAStop(&m_hspi);
-            buildTX();
-            (void)tryArmDmaFrame();
-
-            const microseconds t1 = m_Timer.elapsed_time();
-            m_SPIData.readout_time_us = duration_cast<microseconds>(t1 - t0).count();
-            continue;
+        core_util_critical_section_enter();
+        if (m_state == State::Active &&
+            static_cast<uint32_t>(us_ticker_read()-m_armed_at) >= m_transaction_timeout_us) {
+            ++m_diagnostics.failed_count;
+            ++m_diagnostics.transaction_timeout_count;
+            m_state = State::Recover;
         }
-
-        __HAL_DMA_CLEAR_FLAG(&m_dma_rx, m_rx_tc_flag);
-        __HAL_DMA_CLEAR_FLAG(&m_dma_tx, m_tx_tc_flag);
-
-        // Clear possible OVR (read DR then SR while SPI enabled)
-        if (__HAL_SPI_GET_FLAG(&m_hspi, SPI_FLAG_OVR)) {
-            volatile uint32_t d;
-            d = m_hspi.Instance->DR; d = m_hspi.Instance->SR; (void)d;
-        }
-
-        HAL_SPI_DMAStop(&m_hspi);
-
-        const uint8_t hdr    = m_buffer_rx[0];
-        const uint8_t crc_rx = m_buffer_rx[SPI_MSG_SIZE - 1];
-
-        if ((hdr == SPI_HEADER_MASTER || hdr == SPI_HEADER_MASTER2) &&
-            verifyChecksum(m_buffer_rx, SPI_MSG_SIZE - 1, crc_rx)) {
-
-            if (hdr == SPI_HEADER_MASTER) {
-                core_util_critical_section_enter();
-                std::memcpy(m_SPIData.data, &m_buffer_rx[1], SPI_NUM_FLOATS * sizeof(float));
-                m_SPIData.message_count++;
-
-                const microseconds now = m_Timer.elapsed_time();
-                m_SPIData.last_delta_time_us = duration_cast<microseconds>(now - m_time_previous).count();
-                m_time_previous = now;
-
-                m_has_new_data = true;
-                core_util_critical_section_exit();
-            }
-        } else {
+        const bool recover = m_state == State::Recover;
+        core_util_critical_section_exit();
+        if (recover) {
+            resetSPIPeripheral();
             core_util_critical_section_enter();
-            m_SPIData.failed_count++;
+            m_state = m_InterruptIn_NSS.read() ? State::Idle : State::WaitHigh;
             core_util_critical_section_exit();
         }
-
-        buildTX();
-        (void)tryArmDmaFrame();
-
-        const microseconds t1 = m_Timer.elapsed_time();
-        m_SPIData.readout_time_us = duration_cast<microseconds>(t1 - t0).count();
+        ThisThread::flags_wait_any_for(m_ThreadFlag, 1ms);
     }
+}
+
+bool SpiSlaveDMA::processFrame() {
+    // Called on NSS rising, after wire completion. TX DMA alone can finish
+    // before the last byte leaves SPI, so both DMA completion and errors matter.
+    const bool complete = __HAL_DMA_GET_FLAG(&m_dma_rx, m_rx_tc_flag) &&
+                          __HAL_DMA_GET_FLAG(&m_dma_tx, m_tx_tc_flag);
+    const bool peripheral_error = __HAL_SPI_GET_FLAG(&m_hspi, SPI_FLAG_OVR) ||
+        __HAL_SPI_GET_FLAG(&m_hspi, SPI_FLAG_RXNE) ||
+        __HAL_DMA_GET_FLAG(&m_dma_rx, m_rx_error_flags) ||
+        __HAL_DMA_GET_FLAG(&m_dma_tx, m_tx_error_flags);
+    const bool stopped = !(m_dma_rx.Instance->CR & DMA_SxCR_EN) &&
+                         !(m_dma_tx.Instance->CR & DMA_SxCR_EN);
+    if (!complete || !stopped || peripheral_error) {
+        core_util_critical_section_enter();
+        m_diagnostics.failed_count++;
+        if (!complete || !stopped) m_diagnostics.incomplete_count++;
+        if (peripheral_error) m_diagnostics.peripheral_error_count++;
+        core_util_critical_section_exit();
+        return false;
+    }
+    CLEAR_BIT(m_hspi.Instance->CR2, SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN);
+    m_dma_rx.State = HAL_DMA_STATE_READY;
+    m_dma_tx.State = HAL_DMA_STATE_READY;
+    m_hspi.State = HAL_SPI_STATE_READY;
+    const uint8_t header = m_buffer_rx[0];
+    bool valid = (header == SPI_HEADER_MASTER || header == SPI_HEADER_READ) &&
+                 verifyChecksum(m_buffer_rx, SPI_MSG_SIZE - 1, m_buffer_rx[SPI_MSG_SIZE - 1]);
+    if (header == SPI_HEADER_READ) {
+        for (size_t i = 1; i < SPI_MSG_SIZE - 1; ++i)
+            valid = valid && m_buffer_rx[i] == 0;
+    }
+    if (!valid) {
+        core_util_critical_section_enter();
+        m_diagnostics.failed_count++;
+        m_diagnostics.invalid_frame_count++;
+        core_util_critical_section_exit();
+        return false;
+    }
+    if (header == SPI_HEADER_MASTER) {
+        SpiCommand command;
+        std::memcpy(command.data, &m_buffer_rx[1], sizeof(command.data));
+        command.received_at_us = us_ticker_read();
+        const uint32_t now = command.received_at_us;
+        const uint32_t delta_us = now - m_time_previous;
+        m_time_previous = now;
+        core_util_critical_section_enter();
+        m_command = command;
+        m_diagnostics.message_count++;
+        m_diagnostics.last_delta_time_us = delta_us;
+        m_has_new_data = true;
+        core_util_critical_section_exit();
+    }
+    return true;
 }
 
 void SpiSlaveDMA::buildTX() {
@@ -298,56 +274,25 @@ void SpiSlaveDMA::buildTX() {
 }
 
 bool SpiSlaveDMA::tryArmDmaFrame() {
-    (void)HAL_DMA_Abort(&m_dma_rx);
-    (void)HAL_DMA_Abort(&m_dma_tx);
-
+    // Normal-mode streams must have stopped before their addresses/counts change.
+    // Prepare the immutable frame before enabling DMA; do not wait in this ISR.
+    if ((m_dma_rx.Instance->CR | m_dma_tx.Instance->CR) & DMA_SxCR_EN) return false;
     __HAL_DMA_CLEAR_FLAG(&m_dma_rx, m_rx_all_flags);
     __HAL_DMA_CLEAR_FLAG(&m_dma_tx, m_tx_all_flags);
-
-    if (HAL_SPI_GetState(&m_hspi) != HAL_SPI_STATE_READY) {
-        (void)HAL_SPI_Abort(&m_hspi);
-    }
-
-    // Guard: only arm when NSS is high (avoid hang if master holds it low)
-    GPIO_TypeDef* nss_port = nullptr;
-    uint16_t nss_pinmask = 0;
-    if      (m_NSS == PB_12) { nss_port = GPIOB; nss_pinmask = GPIO_PIN_12; }
-    else if (m_NSS == PB_9 ) { nss_port = GPIOB; nss_pinmask = GPIO_PIN_9;  }
-    else if (m_NSS == PA_4 ) { nss_port = GPIOA; nss_pinmask = GPIO_PIN_4;  }
-    else if (m_NSS == PA_15) { nss_port = GPIOA; nss_pinmask = GPIO_PIN_15; }
-
-    if (nss_port != nullptr) {
-        static constexpr uint32_t NSS_TIMEOUT_MS = 5;
-        const uint32_t t0 = HAL_GetTick();
-        while (HAL_GPIO_ReadPin(nss_port, nss_pinmask) == GPIO_PIN_RESET) {
-            if ((HAL_GetTick() - t0) > NSS_TIMEOUT_MS) {
-                m_consecutive_failures++;
-                if (m_consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
-                    resetSPIPeripheral();
-                }
-                return false;
-            }
-        }
-    }
-
-    HAL_StatusTypeDef st = HAL_SPI_TransmitReceive_DMA(&m_hspi, m_buffer_tx, m_buffer_rx, SPI_MSG_SIZE);
-    if (st != HAL_OK) {
-        m_consecutive_failures++;
-
-        static uint32_t throttle = 0;
-        if ((throttle++ % 100U) == 0U) {
-            printf("[%s] Arm failed: st=%ld, state=%u, err=0x%08lX (fails=%lu)\n",
-                   instanceName(), (long)st, (unsigned)HAL_SPI_GetState(&m_hspi),
-                   (unsigned long)m_hspi.ErrorCode, (unsigned long)m_consecutive_failures);
-        }
-
-        if (m_consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
-            resetSPIPeripheral();
-        }
-        return false;
-    }
-
-    m_consecutive_failures = 0;
+    m_dma_rx.Instance->M0AR = reinterpret_cast<uint32_t>(m_buffer_rx);
+    m_dma_tx.Instance->M0AR = reinterpret_cast<uint32_t>(m_buffer_tx);
+    m_dma_rx.Instance->PAR = reinterpret_cast<uint32_t>(&m_hspi.Instance->DR);
+    m_dma_tx.Instance->PAR = reinterpret_cast<uint32_t>(&m_hspi.Instance->DR);
+    m_dma_rx.Instance->NDTR = SPI_MSG_SIZE;
+    m_dma_tx.Instance->NDTR = SPI_MSG_SIZE;
+    m_dma_rx.State = HAL_DMA_STATE_BUSY;
+    m_dma_tx.State = HAL_DMA_STATE_BUSY;
+    m_hspi.State = HAL_SPI_STATE_BUSY_TX_RX;
+    __DMB();
+    __HAL_DMA_ENABLE(&m_dma_rx);
+    __HAL_DMA_ENABLE(&m_dma_tx);
+    SET_BIT(m_hspi.Instance->CR2, SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN);
+    __HAL_SPI_ENABLE(&m_hspi);
     return true;
 }
 
@@ -367,8 +312,40 @@ bool SpiSlaveDMA::verifyChecksum(const uint8_t* buffer, size_t length, uint8_t e
 
 // ============================ ISR hook ========================================
 
-void SpiSlaveDMA::sendThreadFlag() {
-    m_Thread.flags_set(m_ThreadFlag);
+void SpiSlaveDMA::handleNss() {
+    const uint32_t started = us_ticker_read();
+    if (!m_InterruptIn_NSS.read()) {
+        if (m_state != State::Idle) { ++m_diagnostics.ignored_nss_count; return; }
+        buildTX();
+        if (!tryArmDmaFrame()) {
+            ++m_diagnostics.arm_failure_count;
+            m_state = State::Recover;
+            m_Thread.flags_set(m_ThreadFlag);
+            return;
+        }
+        m_armed_at = started;
+        m_state = State::Active;
+        const uint32_t elapsed = us_ticker_read()-started;
+        if (elapsed > m_diagnostics.max_prepare_us)
+            m_diagnostics.max_prepare_us = elapsed;
+    } else {
+        if (m_state == State::WaitHigh) { m_state = State::Idle; return; }
+        if (m_state != State::Active) return;
+        const bool expired = static_cast<uint32_t>(started - m_armed_at) >= m_transaction_timeout_us;
+        if (expired) {
+            ++m_diagnostics.failed_count;
+            ++m_diagnostics.transaction_timeout_count;
+        }
+        if (!expired && processFrame()) {
+            m_state = State::Idle;
+        } else {
+            m_state = State::Recover;
+            if (resetFast()) m_state = State::Idle;
+            else m_Thread.flags_set(m_ThreadFlag);
+        }
+        const uint32_t elapsed = us_ticker_read()-started;
+        m_diagnostics.readout_time_us = elapsed;
+    }
 }
 
 // ============================ HW config / pins / DMA ==========================
@@ -548,13 +525,15 @@ void SpiSlaveDMA::configureGPIOandDMA() {
     const uint32_t ht = ht_flag_for(m_dma_rx.Instance);
     const uint32_t fe = fe_flag_for(m_dma_rx.Instance);
     m_rx_tc_flag   = tc_flag_for(m_dma_rx.Instance);
-    m_rx_all_flags = (m_rx_tc_flag | te | ht | fe);
+    m_rx_error_flags = te | fe | __HAL_DMA_GET_DME_FLAG_INDEX(&m_dma_rx);
+    m_rx_all_flags = m_rx_tc_flag | ht | m_rx_error_flags;
 
     const uint32_t te2 = te_flag_for(m_dma_tx.Instance);
     const uint32_t ht2 = ht_flag_for(m_dma_tx.Instance);
     const uint32_t fe2 = fe_flag_for(m_dma_tx.Instance);
     m_tx_tc_flag   = tc_flag_for(m_dma_tx.Instance);
-    m_tx_all_flags = (m_tx_tc_flag | te2 | ht2 | fe2);
+    m_tx_error_flags = te2 | fe2 | __HAL_DMA_GET_DME_FLAG_INDEX(&m_dma_tx);
+    m_tx_all_flags = m_tx_tc_flag | ht2 | m_tx_error_flags;
 }
 
 bool SpiSlaveDMA::validatePins() const {
@@ -594,31 +573,51 @@ bool SpiSlaveDMA::validatePins() const {
 }
 
 void SpiSlaveDMA::resetSPIPeripheral() {
-    printf("[%s] Resetting SPI peripheral due to %lu consecutive failures\n",
-           instanceName(), (unsigned long)m_consecutive_failures);
-
+    // Reset only this SPI instance, not DMA1/2 (other peripherals may use it).
     HAL_SPI_DMAStop(&m_hspi);
     HAL_SPI_DeInit(&m_hspi);
     HAL_DMA_DeInit(&m_dma_rx);
     HAL_DMA_DeInit(&m_dma_tx);
-    ThisThread::sleep_for(2ms);
-
-    configureGPIOandDMA();
-
-    if (HAL_SPI_Init(&m_hspi) != HAL_OK) {
-        printf("[%s] ERROR: Failed to reinitialize SPI after reset\n", instanceName());
-        return;
+    if (m_instance == Instance::SPI_1) {
+        __HAL_RCC_SPI1_FORCE_RESET();
+        __HAL_RCC_SPI1_RELEASE_RESET();
+    } else if (m_instance == Instance::SPI_2) {
+        __HAL_RCC_SPI2_FORCE_RESET();
+        __HAL_RCC_SPI2_RELEASE_RESET();
+    } else {
+        __HAL_RCC_SPI3_FORCE_RESET();
+        __HAL_RCC_SPI3_RELEASE_RESET();
     }
-
-    m_consecutive_failures = 0;
-    printf("[%s] SPI peripheral reset complete - ready\n", instanceName());
+    configureGPIOandDMA();
+    (void)HAL_SPI_Init(&m_hspi);
+    core_util_critical_section_enter();
+    m_diagnostics.recovery_count++;
+    core_util_critical_section_exit();
 }
 
-const char* SpiSlaveDMA::instanceName() const {
-    switch (m_instance) {
-        case Instance::SPI_1: return "SPI1";
-        case Instance::SPI_2: return "SPI2";
-        case Instance::SPI_3: return "SPI3";
+// No polling or HAL calls: if a stream has not stopped, defer to the worker.
+// Resetting the selected SPI clears stale DR/shift-register data after a short
+// or oversized frame, without disturbing other DMA users or GPIO configuration.
+bool SpiSlaveDMA::resetFast() {
+    const uint32_t cr1 = m_hspi.Instance->CR1 & ~SPI_CR1_SPE;
+    const uint32_t cr2 = m_hspi.Instance->CR2 & ~(SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN);
+    CLEAR_BIT(m_hspi.Instance->CR2, SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN);
+    __HAL_DMA_DISABLE(&m_dma_rx);
+    __HAL_DMA_DISABLE(&m_dma_tx);
+    __DSB();
+    if ((m_dma_rx.Instance->CR | m_dma_tx.Instance->CR) & DMA_SxCR_EN) return false;
+    if (m_instance == Instance::SPI_1) {
+        __HAL_RCC_SPI1_FORCE_RESET(); __HAL_RCC_SPI1_RELEASE_RESET();
+    } else if (m_instance == Instance::SPI_2) {
+        __HAL_RCC_SPI2_FORCE_RESET(); __HAL_RCC_SPI2_RELEASE_RESET();
+    } else {
+        __HAL_RCC_SPI3_FORCE_RESET(); __HAL_RCC_SPI3_RELEASE_RESET();
     }
-    return "?";
+    m_hspi.Instance->CR1 = cr1;
+    m_hspi.Instance->CR2 = cr2;
+    m_hspi.State = HAL_SPI_STATE_READY;
+    m_dma_rx.State = HAL_DMA_STATE_READY;
+    m_dma_tx.State = HAL_DMA_STATE_READY;
+    ++m_diagnostics.recovery_count;
+    return true;
 }

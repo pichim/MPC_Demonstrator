@@ -4,21 +4,20 @@
 #include <cmath>
 #include <cstdint>
 
-using MutexLock = rtos::ScopedMutexLock;
-
-fast_realtime_thread::fast_realtime_thread(IO_handler &io, float Ts)
-    : thread(osPriorityHigh2, (4 * OS_STACK_SIZE))
+fast_realtime_thread::fast_realtime_thread(IO_handler &io, SpiSlaveDMA &spi, float Ts)
+    : thread(MPC_FAST_RT_PRIORITY, MPC_FAST_RT_STACK_SIZE)
     , Ts(Ts)
     , io_handler(io)
+    , spi(spi)
 {
-    notchEncoders[0].notchInit(F_CUT_HZ_NOTCH, D_NOTCH, Ts);
-    notchEncoders[1].notchInit(F_CUT_HZ_NOTCH, D_NOTCH, Ts);
+    notchEncoders[0].notchInit(MPC_F_CUT_HZ_NOTCH, MPC_D_NOTCH, Ts);
+    notchEncoders[1].notchInit(MPC_F_CUT_HZ_NOTCH, MPC_D_NOTCH, Ts);
 
-    lowPass2CurrentSetpoint.lowPass2Init(F_CUT_HZ, D, Ts);
+    lowPass2CurrentSetpoint.lowPass2Init(MPC_F_CUT_HZ, MPC_CURRENT_SETPOINT_DAMPING, Ts);
 
-    pidCntrl.setup(KP_I, KI_I, 0.0f, 0.0f, TAU_RO_I, Ts, (-POWERSUPPLY_VOLTAGE + OFFSET_VOLTAGE), (POWERSUPPLY_VOLTAGE - OFFSET_VOLTAGE));
+    pidCntrl.setup(MPC_KP_I, MPC_KI_I, 0.0f, 0.0f, MPC_TAU_RO_I, Ts, (-MPC_POWERSUPPLY_VOLTAGE + MPC_OFFSET_VOLTAGE), (MPC_POWERSUPPLY_VOLTAGE - MPC_OFFSET_VOLTAGE));
 
-#if PERFORM_GPA_MEAS
+#if MPC_PERFORM_GPA_MEAS
     // closed-loop measurement
     const float fMin = 10.0f;
     const float fMax = 0.99f / (2.0f * Ts);
@@ -38,34 +37,16 @@ fast_realtime_thread::fast_realtime_thread(IO_handler &io, float Ts)
 
 fast_realtime_thread::~fast_realtime_thread() {}
 
-void fast_realtime_thread::updateState(bool enable, float current_setpoint)
-{
-    MutexLock lock(m_mutex);
-    m_is_enabled = enable;
-    m_current_setpoint = current_setpoint;
-}
-
-void fast_realtime_thread::updateStateAndReturnMeasurements(bool enable, float current_setpoint, float &current, float &motor_angle, float &pendulum_angle)
-{
-    MutexLock lock(m_mutex);
-    m_is_enabled = enable;
-    m_current_setpoint = current_setpoint;
-    current = m_current;
-    motor_angle = m_motor_angle;
-    pendulum_angle = m_pendulum_angle;
-}
-
 void fast_realtime_thread::loop(void)
 {
 
-#if PERFORM_GPA_MEAS
-    io_handler.set_enable_motor(true);
-    updateState(true, 0.0f);
+#if MPC_PERFORM_GPA_MEAS
     float exc = 0.0f;
     // Print gpa info
     m_GPA.printGPAmeasPara();
 #endif
 
+    CurrentCommand command;
     while (true) {
         ThisThread::flags_wait_any(threadFlag);
 
@@ -76,37 +57,39 @@ void fast_realtime_thread::loop(void)
         const float motor_angle = notchEncoders[0].apply(io_handler.read_encoder_motor());
         const float pendulum_angle = notchEncoders[1].apply(io_handler.read_encoder_pendulum());
 
-        bool is_enabled;
-        float current_setpoint;
-        {
-            MutexLock lock(m_mutex);
-            is_enabled = m_is_enabled;
-            current_setpoint = m_current_setpoint;
-            m_current = current;
-            m_motor_angle = motor_angle;
-            m_pendulum_angle = pendulum_angle;
-        }
+        // Consume the newest command only. Expiry starts at SPI receipt, not
+        // here; a delayed current iteration must not extend an old command.
+        SpiCommand received;
+        if (spi.takeCommand(received))
+            command.accept(received.data, received.received_at_us);
+        command.expire(us_ticker_read(), MPC_COMMAND_TIMEOUT_US);
+        spi.setReplyData(motor_angle, pendulum_angle, current);
+
+        // Disable the bridge before resetting PWM/controller state. On enable,
+        // prepare direction and PWM first, then assert the bridge enable.
+        if (!command.enabled) io_handler.set_enable_motor(false);
 
         // Current controller
-        if (is_enabled) {
+        if (command.enabled) {
 
             // Error
-            float current_error = lowPass2CurrentSetpoint.apply(current_setpoint) - current;
-#if PERFORM_GPA_MEAS
+            float current_error = lowPass2CurrentSetpoint.apply(command.current) - current;
+#if MPC_PERFORM_GPA_MEAS
             current_error += exc + 0.6f;
 #endif
             // Controller
             const float u = pidCntrl.update(current_error, current);
 
-            // Caluclate direction and PWM value
+            // Calculate direction and PWM value
             if (u > 0.0f)
                 io_handler.set_dir(0);
             else
                 io_handler.set_dir(1);
 
-            io_handler.write_pwm_motor(clamp((fabs(u) + OFFSET_VOLTAGE) / POWERSUPPLY_VOLTAGE, 0.0f, 1.0f));
+            io_handler.write_pwm_motor(clamp((fabs(u) + MPC_OFFSET_VOLTAGE) / MPC_POWERSUPPLY_VOLTAGE, 0.0f, 1.0f));
+            io_handler.set_enable_motor(true);
 
-#if PERFORM_GPA_MEAS
+#if MPC_PERFORM_GPA_MEAS
             // Update GPA excitation
             exc = m_GPA.update(u, current);
 #endif
@@ -120,10 +103,11 @@ void fast_realtime_thread::loop(void)
     }
 }
 
-void fast_realtime_thread::start_loop(void)
+bool fast_realtime_thread::start_loop(void)
 {
-    thread.start(callback(this, &fast_realtime_thread::loop));
+    if (thread.start(callback(this, &fast_realtime_thread::loop)) != osOK) return false;
     ticker.attach(callback(this, &fast_realtime_thread::sendSignal), microseconds{static_cast<int64_t>(Ts * 1e6f)});
+    return true;
 }
 
 float fast_realtime_thread::clamp(float val, float min, float max)
@@ -133,4 +117,9 @@ float fast_realtime_thread::clamp(float val, float min, float max)
     if (val > max)
         return max;
     return val;
+}
+
+void fast_realtime_thread::sendSignal()
+{
+    thread.flags_set(threadFlag);
 }

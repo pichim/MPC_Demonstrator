@@ -2,19 +2,18 @@
 
 // constructors
 IO_handler::IO_handler(void)
-    : encoder_motor(PA_6, PC_7, ENCODER_MOTOR_COUNTS_PER_TURN)
-    , encoder_pendulum(PB_6, PB_7, ENCODER_PENDULUM_COUNTS_PER_TURN)
-    , pwm(PB_15)
+    : encoder_motor(MPC_MOTOR_ENCODER_A_PIN, MPC_MOTOR_ENCODER_B_PIN, MPC_ENCODER_MOTOR_COUNTS_PER_TURN)
+    , encoder_pendulum(MPC_PENDULUM_ENCODER_A_PIN, MPC_PENDULUM_ENCODER_B_PIN, MPC_ENCODER_PENDULUM_COUNTS_PER_TURN)
+    , pwm(MPC_MOTOR_PWM_PIN)
     , pwm_val(0.0f)
-    , dir(PB_14)
-    , enable(PB_9)
-    , current(PA_7)
-    , fault(PB_8)
-    , rtt_do(PB_4)
-    , frtt_do(PB_5)
+    , dir(MPC_MOTOR_DIR_PIN)
+    , enable(MPC_MOTOR_ENABLE_PIN)
+    , current(MPC_CURRENT_PIN)
+    , fault(MPC_MOTOR_FAULT_PIN)
+    , frtt_do(MPC_FAST_RT_DEBUG_PIN)
 {
-    pwm.write(0.0f); // enusure motor is off
-    pwm.period_us(MOTOR_PWM_PERIOD_US);
+    pwm.write(0.0f); // Ensure PWM starts at zero.
+    pwm.period_us(MPC_MOTOR_PWM_PERIOD_US);
     dir = 0;
     enable = 0;
 }
