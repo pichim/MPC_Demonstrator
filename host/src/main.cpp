@@ -98,6 +98,8 @@ void run(NssSPI &spi, Log &log)
         // Future controller computation belongs here, after receiving sensors.
         const int mode = MODE;
         float setpoint = enabled ? SETPOINT : 0.0f;
+        if (!std::isfinite(setpoint))
+            throw std::runtime_error("Non-finite controller setpoint; stopping.");
         const float limit = mode == 0 ? CURRENT_LIMIT_A : VOLTAGE_LIMIT_V;
         setpoint = std::clamp(setpoint, -limit, limit);
         const auto command_start = monotonic_ns();

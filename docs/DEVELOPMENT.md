@@ -7,6 +7,85 @@ register checks are not physical actuator tests. See [README](../README.md) for
 current build/run instructions; historical commands below require their matching
 firmware and clients.
 
+## Full review against the original SPI port — 2026-09-26
+
+Baseline: `72ce22c` ("Ported to spi communication from Mapping_Robot project").
+Reviewed its final-state difference against `127ce2b` and the fixes below, rather
+than treating intermediate experiments as current design. 365 files are unchanged
+moves; inherited utility/Eigen code was preserved. The main changes are:
+
+| Area | Original SPI port | Current handover version |
+| --- | --- | --- |
+| Layout/build | MCU at root, Python under `python/` | Separate `mcu/`, `host/`, `docs/`; independent builds; VS Code targets MCU |
+| Host exchange | Python ARM → delay → COMMAND, 5 MHz, 500 Hz | Matching Python/C++ READ → compute → COMMAND, 30 MHz, 1 kHz; kernel NSS setup and enforced inactive interval |
+| Firmware ownership | 200 µs intermediary task plus 50 µs current task, mutex-shared state | 50 µs `MotorControlThread` owns sensors/control/enable; atomic latest-command mailbox; SPI recovery worker |
+| SPI recovery | ARM/worker-driven preparation | NSS edges frame immutable DMA buffers; length/CRC/header/DMA checks, bounded IRQ reset and worker fallback/timeout |
+| Commands | Current/enable/reserved, 14 bytes | Current or voltage/enable/mode/reserved, 18 bytes; receipt-based 300 ms expiry |
+| Motor signals | Motor/pendulum positions and current | Motor-only voltage/current/position/velocity; optional position notch; count-derived velocity with 100 Hz LP and notch |
+| Control | Current PID, 500 Hz reference LP, fixed 2 V compensation | Original gains/LP retained; initialized live handover; direct voltage mode; configurable compensation defaults to zero; limits ±1 A/±24 V in hosts, voltage saturation in MCU |
+| Logging | Unbounded run, live terminal windows | Rounded finite cycle count; preallocated data/timing buffers; CSV after disable/close; MATLAB/Python import and weighted statistics/p99 |
+
+Two numeric failure cases were reproduced and fixed during this review:
+
+- Python's clamp converted a NaN produced after configuration validation into a
+  positive-limit command. Both hosts now reject non-finite controller results
+  before clamping and use their existing failure/final-disable paths. Normal
+  constant settings were already validated; this also protects controller code
+  added at the documented computation point.
+- Extreme finite current commands could overflow MCU filter/PID arithmetic and
+  pass NaN to PWM. The MCU now shares one disable/reset path for expiry, explicit
+  disable and non-finite computed voltage. This does not reinstate a current
+  limit. Output remains disabled until another enabled command arrives.
+
+The existing CMake and Mbed application configuration are retained unchanged.
+Their SD/schema and dependency warnings remain non-blocking with the installed
+toolchain. README records that the local Mbed dependency/venv are not tracked by
+Git and identifies the tested Mbed revision. Initial powered-motor testing starts
+in zero-voltage mode, because zero current is still active current regulation.
+
+Final verification for this review (the runs below used the temporarily simplified
+build configuration, before restoring the original build files). Rebuilding with
+the restored files passed and produced a byte-for-byte identical firmware binary
+to the flashed/tested image:
+
+- Fresh Release host and Develop MCU builds passed. Also compiled GPA enabled,
+  position notch disabled and 2 V compensation, then restored/rebuilt defaults.
+- All four repository tests, host-limit and N=0/1/2 CSV-parity checks passed.
+  Injected NaN/+Inf/−Inf after host configuration validation: both hosts failed
+  the run, emitted no enabled command and attempted the final disable. The MCU
+  extreme-finite-command test produced 0 non-finite PWM samples out of 200 after
+  the fix; ASan/UBSan passed with leak detection disabled. Normal ±2 A handover,
+  voltage saturation and host-only current limits still passed. A 22,000-tick
+  before/after simulation produced identical valid-input output across mode
+  switches, signed references, enable/disable, voltage saturation and expiry.
+- Flashed and verified final default firmware. Hardware recovery passed 1,000
+  exchanges and three fault rounds (seven malformed-frame cases plus cancellation
+  and timeout, 100 good exchanges after each). Both hosts passed normal completion
+  and Ctrl+C/partial logging. Positive/negative/zero voltage, 100 mode-switch pairs,
+  invalid-mode shutdown and expiry while reading passed.
+- On the sensorless MCU bench, ±float32-maximum current requests returned finite
+  zero-voltage telemetry at 20 ms, before command expiry. A later valid voltage
+  command restored output; the test ended with a disabled command. This validates
+  the numeric failure path, not physical motor protection.
+
+Final timings: core 3, FIFO 50, 30 MHz; 20,000 current-mode cycles and 5,000
+voltage-mode cycles per host. Values are ms; CPU is percent of one core.
+
+| Client / mode | dt min | dt mean | dt p99 | dt max | SPI min | SPI mean | SPI p99 | SPI max | CPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| C++ current | 0.8707 | 1.0015 | 1.0076 | 1.1982 | 0.1515 | 0.1594 | 0.1659 | 0.3357 | 5.51% |
+| C++ voltage | 0.9869 | 1.0015 | 1.0072 | 1.0384 | 0.1513 | 0.1593 | 0.1644 | 0.1949 | 5.50% |
+| Python current | 0.2263 | 1.0024 | 1.0145 | 1.8750 | 0.1613 | 0.1672 | 0.1780 | 0.9903 | 6.59% |
+| Python voltage | 0.9376 | 1.0022 | 1.0092 | 1.0571 | 0.1616 | 0.1669 | 0.1727 | 0.2362 | 6.55% |
+
+Artifacts: `/tmp/mpc-baseline-review-EaFauI/`. No test framework or generated logs
+were added to the repository. These results do not establish hard deadlines; the
+older 57 µs MCU startup observation was not remeasured. GPA code and its option
+remain unchanged; GPA was compile-checked, not validated on a physical plant.
+Known GPA reset-state and duplicate-frequency-grid edge cases remain outside
+these fixes. Motor/sensor calibration,
+closed-loop stability and physical moving-mode transients remain unverified.
+
 ## Student handover review — 2026-09-26
 
 Reviewed the staged motor-mode, telemetry, filter, host logging and

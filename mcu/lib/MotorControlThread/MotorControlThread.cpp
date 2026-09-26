@@ -80,27 +80,16 @@ void MotorControlThread::loop(void)
         command.expire(us_ticker_read(), MPC_COMMAND_TIMEOUT_US);
         const bool entering_current = command.enabled && command.mode == MotorCommand::Mode::Current &&
                                       (!was_enabled || previous_mode != command.mode);
-        if (!command.enabled) {
-            // Expiry/disable always wins over handover: no voltage is retained.
-            io_handler.set_enable_motor(false);
-            io_handler.write_pwm_motor(0.0f);
-            voltage = 0.0f;
-            pidCntrl.reset();
-            lowPass2CurrentSetpoint.reset(0.0f);
+        if (entering_current) {
+            lowPass2CurrentSetpoint.reset(current);
+            pidCntrl.trackOutput(voltage, 0.0f, current);
 #if MPC_PERFORM_GPA_MEAS
             exc = 0.0f;
 #endif
-        } else {
-            if (entering_current) {
-                lowPass2CurrentSetpoint.reset(current);
-                pidCntrl.trackOutput(voltage, 0.0f, current);
-#if MPC_PERFORM_GPA_MEAS
-                exc = 0.0f;
-#endif
-            }
+        }
+        if (command.enabled) {
             if (command.mode == MotorCommand::Mode::Current) {
-                // Preserve the previous voltage for the handover tick. Start
-                // evolving the initialized filter/controller on the next tick.
+                // Hold voltage for the handover tick; evolve control next tick.
                 if (!entering_current) {
                     float current_setpoint = lowPass2CurrentSetpoint.apply(command.setpoint);
 #if MPC_PERFORM_GPA_MEAS
@@ -115,6 +104,21 @@ void MotorControlThread::loop(void)
                 // Direct voltage: no current regulation or setpoint smoothing.
                 voltage = command.setpoint;
             }
+        }
+        // Disable/expiry and numeric failure share one output/reset path.
+        // Finite commands can still overflow controller/filter arithmetic.
+        if (!command.enabled || !std::isfinite(voltage)) {
+            command.enabled = false;
+            command.setpoint = 0.0f;
+            io_handler.set_enable_motor(false);
+            io_handler.write_pwm_motor(0.0f);
+            voltage = 0.0f;
+            pidCntrl.reset();
+            lowPass2CurrentSetpoint.reset(0.0f);
+#if MPC_PERFORM_GPA_MEAS
+            exc = 0.0f;
+#endif
+        } else {
             voltage = clamp(voltage, -voltage_limit, voltage_limit);
             io_handler.set_dir(voltage < 0.0f ? 1 : 0);
             // Zero voltage must remain zero even when compensation is enabled.

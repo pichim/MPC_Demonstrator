@@ -109,6 +109,8 @@ def run(spi, log=None):
         # Future controller computation belongs here, after receiving sensors.
         mode = MODE
         setpoint = SETPOINT if enabled else 0.0
+        if not math.isfinite(setpoint):
+            raise RuntimeError("Non-finite controller setpoint; stopping.")
         limit = CURRENT_LIMIT_A if mode == 0 else VOLTAGE_LIMIT_V
         setpoint = max(-limit, min(limit, setpoint))
         command_start = time.perf_counter()

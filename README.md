@@ -197,8 +197,9 @@ Both use the same single-threaded READ → compute → COMMAND → record → sl
 `chrt` sets FIFO priority 50. Pacing is relative to each cycle's start, without
 catch-up bursts; this is not a hard real-time guarantee. `Trun` determines the cycle count, not a wall-clock deadline.
 
-Both attempt a final disabled command after completion, Ctrl+C or communication
-errors, and report partial results. C++ also handles SIGTERM; use Ctrl+C for Python.
+Both reject non-finite controller results before applying command limits. They
+attempt a final disabled command after completion, Ctrl+C or execution errors, and
+report partial results. C++ also handles SIGTERM; use Ctrl+C for Python.
 A failed final-disable exchange returns nonzero. Replies are prepared before command
 receipt and do not prove application. MCU command expiry remains independent.
 
@@ -310,7 +311,10 @@ Only CRC-valid commands with finite setpoint, valid mode/enable and reserved zer
 the **300 ms command expiry**, measured from MCU receipt. Reads and corrupt frames
 do not refresh it. Invalid command values disable output when consumed; a newer
 command can overwrite an unconsumed one. Repeated valid commands refresh expiry.
-Disable/expiry clears enable and PWM and resets the controller/filter. Direction
+Disable/expiry clears enable and PWM and resets the controller/filter. A non-finite
+computed control voltage takes the same reset path; output stays disabled until
+a new enabled command arrives. This catches arithmetic overflow without adding
+a current limit to the MCU. Direction
 and PWM are prepared before asserting enable. GPA mode also requires valid enabled current-mode commands. Expiry depends on the motor task running, and cannot protect against
 an MCU stall. The hosts limit current setpoints; the MCU does not. Voltage mode has no current protection. The
 reserved fault input is not checked. Physical limits must match the attached motor.
@@ -341,8 +345,8 @@ checks and disabled-command recovery checker above, then run each host separatel
 and analyze its CSV. A default completed run contains 20,000 data rows with finite
 motor values; the first row is disabled and has `dt_n=0`. Default clients enable
 the output from the second cycle. For an initial powered-motor check, set
-`SETPOINT=0` in the selected host before running, then verify encoder/current signs
-and scaling before increasing the command. Mode switching and controller tuning
+`MODE=1` and `SETPOINT=0` (zero voltage) in the selected host before running,
+then verify encoder/current signs and scaling before increasing the command. Mode switching and controller tuning
 must be tested on the actual motor; the sensorless bench cannot establish them.
 
 SPI error/recovery counters are available through `SpiSlaveDMA::getDiagnostics()`
