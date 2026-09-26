@@ -10,7 +10,7 @@
 #define MPC_SPI_NSS_PIN PB_12
 #define MPC_SPI_TRANSACTION_TIMEOUT_US 20000 // Abort NSS held low beyond 20 ms
 
-// Periodic current task and SPI recovery worker (Mbed RTOS priorities)
+// Periodic motor task and SPI recovery worker (Mbed RTOS priorities)
 #define MPC_FAST_RT_PERIOD_US 50
 #define MPC_FAST_RT_PRIORITY osPriorityHigh2
 #define MPC_FAST_RT_STACK_SIZE (4 * OS_STACK_SIZE)
@@ -21,8 +21,6 @@
 // Motor, sensors, and timing outputs
 #define MPC_MOTOR_ENCODER_A_PIN PA_6
 #define MPC_MOTOR_ENCODER_B_PIN PC_7
-#define MPC_PENDULUM_ENCODER_A_PIN PB_6
-#define MPC_PENDULUM_ENCODER_B_PIN PB_7
 #define MPC_MOTOR_PWM_PIN PB_15
 #define MPC_MOTOR_DIR_PIN PB_14
 #define MPC_MOTOR_ENABLE_PIN PB_9
@@ -35,16 +33,14 @@
 #define MPC_CURRENT_AMPLIFIER_GAIN 50.0f
 #define MPC_CURRENT_SHUNT_OHM 7.0e-3f
 #define MPC_CURRENT_SIGN -1.0f
-#define MPC_PENDULUM_ENCODER_SIGN -1.0f
 
 #define MPC_PERFORM_GPA_MEAS false
 
-#define MPC_ENCODER_MOTOR_COUNTS_PER_TURN (4 * 4096)    // 4096 PPR encoder with x4 decoding
-#define MPC_ENCODER_PENDULUM_COUNTS_PER_TURN (4 * 1024) // 1024 PPR encoder with x4 decoding
-#define MPC_MOTOR_PWM_PERIOD_US 50                      // 20 kHz PWM
+#define MPC_ENCODER_MOTOR_COUNTS_PER_TURN (4 * 4096) // 4096 PPR encoder with x4 decoding
+#define MPC_MOTOR_PWM_PERIOD_US 50                   // 20 kHz PWM
 
 #define MPC_POWERSUPPLY_VOLTAGE 24.0f // Voltage of the power supply in Volts
-#define MPC_OFFSET_VOLTAGE 2.0f       // Offset voltage to overcome motor deadzone in Volts
+#define MPC_OFFSET_VOLTAGE 0.0f       // Optional compensation in both modes; previously 2 V.
 
 #define MPC_KP_I 2.5f                  // Proportional gain current controller
 #define MPC_TN_I (0.0013f / 4.5320f)   // Integral time constant current controller (L / R)
@@ -52,10 +48,13 @@
 // Time constant of the current controller's first-order rolloff filter.
 #define MPC_TAU_RO_I (1.f / (2.f * 3.14159265358979323846f * 3.0e3f))
 
+#define MPC_POSITION_NOTCH_ENABLED true // Velocity notch remains enabled.
+#define MPC_VELOCITY_F_CUT_HZ 100.0f    // First-order low-pass of encoder count velocity.
+
 #define MPC_F_CUT_HZ_NOTCH 680.0f // Notch filter cutoff frequency in Hz
 #define MPC_D_NOTCH 0.6f          // Notch filter damping
 
-#define MPC_F_CUT_HZ 500.0f               // Second order low-pass filter cutoff frequency in Hz
-#define MPC_CURRENT_SETPOINT_DAMPING 0.9f // Second order low-pass filter damping ratio
+#define MPC_CURRENT_SETPOINT_F_CUT_HZ 500.0f // Second order low-pass filter cutoff frequency in Hz
+#define MPC_CURRENT_SETPOINT_DAMPING 0.9f    // Second order low-pass filter damping ratio
 
 #endif /* MPC_CONFIG_H_ */

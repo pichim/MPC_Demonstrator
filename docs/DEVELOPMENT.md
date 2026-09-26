@@ -7,6 +7,157 @@ register checks are not physical actuator tests. See [README](../README.md) for
 current build/run instructions; historical commands below require their matching
 firmware and clients.
 
+## Student handover review — 2026-09-26
+
+Reviewed the staged motor-mode, telemetry, filter, host logging and
+`MotorControlThread` rename changes together. Working tree matched the index
+before this review. No further functional change was needed. Review edits clarify
+the PID preload comment, correct the Nucleo mount path and motor-task wording,
+and add a student test sequence to README.
+
+Both projects were configured in empty build directories under
+`/tmp/mpc-handover-ffDAr2/` (C++ Release; MCU NUCLEO_F446RE/Develop). All 310 MCU
+build steps completed; the freshly built firmware was flashed via OpenOCD and
+verified. This supersedes the earlier note that the host-only-current-limit
+revision had not been flashed. Both defaults remain 20 seconds and current mode.
+
+All four repository tests passed. Temporary checks passed Python/C++ CSV parity
+for N=0/1/2, host command clamping and recorded/transmitted values, unclipped ±2 A
+MCU handover, voltage saturation, filter reset/frequency response and 400,000
+bidirectional encoder updates. MCU simulation/filter/encoder checks used ASan and
+UBSan with leak detection disabled. On hardware, 1,000 exchanges at 500 µs and
+three rounds of seven malformed-frame cases plus cancellation/timeout passed,
+including 100 valid exchanges after each fault. Both hosts completed 20,000
+current-mode cycles and 5,000 voltage-mode cycles, with valid CSV and no reported
+SPI errors. Positive/negative/zero voltage, 100 enabled mode-switch pairs,
+invalid-mode disable and expiry while READ continued passed. Ctrl+C checks passed
+for both clients: exit zero, partial CSV and zero-voltage telemetry afterward.
+
+Host timing used core 3, FIFO 50, 30 MHz SPI, without concurrent builds. Times are
+ms, CPU is percentage of one core; these are observations, not deadline guarantees.
+
+| Client / mode | dt min | dt mean | dt p99 | dt max | SPI min | SPI mean | SPI p99 | SPI max | CPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| C++ current | 0.9088 | 1.0015 | 1.0095 | 1.1272 | 0.1531 | 0.1596 | 0.1675 | 0.2758 | 5.52% |
+| C++ voltage | 0.9610 | 1.0014 | 1.0076 | 1.0562 | 0.1505 | 0.1593 | 0.1636 | 0.2041 | 5.49% |
+| Python current | 0.8467 | 1.0023 | 1.0149 | 1.1911 | 0.1609 | 0.1674 | 0.1809 | 0.3433 | 6.60% |
+| Python voltage | 0.9369 | 1.0022 | 1.0076 | 1.0861 | 0.1594 | 0.1670 | 0.1727 | 0.2483 | 6.55% |
+
+Remaining findings: the clean configure emits existing schema warnings about the
+STORAGE/SD list overrides and ignores the undefined `sd.init-frequency` setting.
+Dependency compilation reports two unused-variable warnings in STM32 system clock
+code and a littlefs string-initializer warning. These are outside the staged
+functional changes and did not prevent the build; dependencies/configuration were
+left unchanged. The earlier 57 µs first-disabled-iteration timing result remains
+a known limitation, not remeasured here. No motor/sensors are attached: physical
+current regulation, polarity, filter response on the plant and moving-mode
+transients remain student bench validation tasks. This review establishes readiness
+for those tests, not 100% reliability or hard real-time operation.
+
+Fresh build logs, test scripts and four timing CSVs are in
+`/tmp/mpc-handover-ffDAr2/`; no test framework or generated logs were added to Git.
+
+## Motor modes and telemetry — 2026-09-26
+
+This section supersedes the earlier current-only, 14-byte protocol below.
+The current protocol uses 18-byte frames: COMMAND carries setpoint, enable,
+mode (0=current, 1=voltage), reserved zero; REPLY carries pre-compensation voltage,
+current, motor position and motor velocity. Both hosts and MCU must be updated
+together. There is no pendulum signal in this version.
+
+Current setpoints are clamped to ±1 A in the hosts only. Both hosts also clamp
+voltage commands to ±24 V, matching MCU supply minus compensation. The MCU retains
+voltage saturation but no current-reference clamp, including for GPA excitation.
+Voltage mode bypasses current regulation and current limiting. Compensation is
+configurable, defaults to 0 V (previously 2 V), applies in both modes and is excluded
+from voltage telemetry. Telemetry reports the limited voltage command, not an ADC
+measurement of motor-terminal voltage.
+
+On entry to current mode, the setpoint filter starts from actual measured current; PID history tracks the previous voltage. The first handover tick
+holds that voltage. Later ticks respond to the new reference and limits. Entry to
+voltage mode applies the requested voltage directly. Disable/expiry takes priority
+and clears output/controller state. Encoder and measurement filters remain
+continuous through mode changes. This supports moving-state handover in software;
+physical stability and transients still require validation with the real motor.
+
+Motor velocity uses wrapped encoder increments and a 100 Hz first-order low-pass,
+following Mapping_Robot's approach, then a separate 680 Hz notch. Position has an
+optional 680 Hz notch, enabled by default. The existing 500 Hz second-order
+backward-Euler current-reference filter is retained (about 20.5° lag at 100 Hz).
+The IIR default constructor now initializes a valid identity filter: its previously
+uninitialized order could cause invalid indexing before an explicit filter init.
+No other filter coefficient changes were needed. README documents the full chain.
+
+Both hosts retain the same single-threaded READ → compute → COMMAND → wait flow,
+20,000-cycle default and deferred output. Matching CSV columns now include host
+read time, four motor signals and the command subsequently sent. N=1 retains every
+sample; grouped windows retain the final cycle's data. The analyzer accepts both
+old timing-only and extended CSVs. Memory is about 1.6 MB for the default buffers.
+
+Follow-up validation after moving current limiting to the hosts: both builds and
+all four existing command/transport tests passed. Temporary tests ran the actual
+Python and C++ loops with mocked SPI for commands −100, 0 and +100 in both modes:
+transmitted and logged commands matched ±1 A / ±24 V limits, with the initial
+cycle disabled. The actual MCU loop with simulated IO passed handover at measured
+currents ±2 A, followed references above 1 A without clipping, and retained ±24 V
+saturation and disable behavior. ASan/UBSan passed with leak detection disabled.
+At that stage this follow-up was built and software-tested, not flashed or
+hardware-timed. The student handover review above subsequently flashed and tested it.
+
+Validation below preceded the follow-up move of current limiting to the hosts
+and addition of host voltage limits; its hardware timing figures describe that
+earlier revision.
+
+Validation performed:
+
+- Native host and MCU builds passed, including an optional GPA-enabled build.
+  Default GPA-disabled firmware was restored afterward. Existing MCU command-policy test and three
+  host transport tests passed; command tests now cover both modes and invalid mode.
+- Temporary tests exercised the actual MCU loop with simulated moving encoder and
+  current inputs: both handover directions, disable/re-enable, ±1 A limiting,
+  voltage saturation and expiry. Actual encoder code passed 400,000 forward/reverse
+  updates across 16-bit counter wraps. ASan/UBSan reported no errors (leak detection
+  disabled because the sandbox does not support it).
+- Filter checks passed steady-state reset, notch rejection, differentiator reset,
+  default identity and PID preload checks. Measured LP1 gain at 100 Hz was 0.707102.
+  Config variants passed with position notch bypassed and compensation set to 2 V,
+  including zero PWM and compensation-free voltage telemetry.
+- Python/C++ CSV output matched byte-for-byte for N=0, 1 and 2 with identical input.
+  Mocked Python execution checked 18-byte frames, current clamping, voltage bypass
+  and recorded commands; extended CSV analysis passed.
+- On normal firmware, 1,000 disabled exchanges at 500 µs passed. Three recovery
+  rounds each injected seven frame faults, cancellation and timeout, with 100 valid
+  exchanges after each. Direct positive/negative/zero voltage, 100 enabled mode
+  switch pairs, invalid-mode disable and 300 ms expiry while READ continued passed.
+
+Final normal-firmware runs used FIFO 50, core 3, 30 MHz SPI and 5,000 cycles each.
+These are functional timing checks, not a controlled performance comparison;
+software checks ran concurrently during part of the session. Times below are ms;
+CPU is percentage of one core. Each run had 4,999 dt and 5,000 SPI samples.
+
+| Client / mode  | dt min | dt mean | dt p99 | dt max | SPI min | SPI mean | SPI p99 | SPI max |   CPU |
+| -------------- | -----: | ------: | -----: | -----: | ------: | -------: | ------: | ------: | ----: |
+| C++ current    | 0.9118 |  1.0022 | 1.0287 | 1.1185 |  0.1550 |   0.1614 |  0.1885 |  0.2604 | 5.75% |
+| C++ voltage    | 0.9454 |  1.0019 | 1.0238 | 1.0752 |  0.1515 |   0.1605 |  0.1830 |  0.2316 | 5.66% |
+| Python current | 0.9135 |  1.0024 | 1.0174 | 1.1233 |  0.1605 |   0.1675 |  0.1831 |  0.2688 | 6.65% |
+| Python voltage | 0.9331 |  1.0023 | 1.0141 | 1.0623 |  0.1613 |   0.1678 |  0.1819 |  0.2533 | 6.60% |
+
+Temporary MCU instrumentation measured work after thread wakeup through output
+update, including intervening interrupts, at 1 µs resolution. Current mode:
+202,490 iterations, mean 16.5883 µs, max 25 µs; voltage: 208,901 iterations,
+mean 15.5440 µs, max 24 µs; current entry: 102 iterations, mean 16.6176 µs,
+max 24 µs. None of these enabled paths reached 50 µs. Disabled operation had
+one 57 µs iteration. A second startup test reproduced it on the **first disabled
+iteration**, with no further ≥50 µs event in 44,585 subsequent iterations. This
+identifies when it occurs, not its internal cause, and is not a universal deadline
+guarantee. Instrumentation was removed and normal firmware was rebuilt, flashed
+and verified before the final host checks. The board has no motor/sensors attached,
+so bench telemetry checks cannot validate physical moving-motor behavior.
+
+Temporary validation artifacts are in `/tmp/mpc-mode-checks-a27egc0i/`,
+`/tmp/mpc-mode-hardware-na6rerkb/`, `/tmp/mpc-mode-profile-check-rg0b3pn4/` and
+`/tmp/mpc-mode-final-n76pqu06/`; they are not repository dependencies.
+
 ## Repository layout note
 
 Historical paths below refer to the layout used during each experiment. Firmware
@@ -130,6 +281,40 @@ errors. Default logs contain the final 20,000-cycle runs; the preceding 60,000-c
 logs were copied to `/tmp/mpc-final-review-60s-{cpp,python}.txt` on this Pi.
 Temporary validation files are not committed. MCU sources and firmware were not
 changed or flashed. MATLAB import is documented but was not executed here.
+
+## CPU affinity comparison — 2026-09-26
+
+Six balanced rounds compared C++/Python, unpinned/core 3: 24 sequential runs of
+10,000 cycles each at 1 kHz, FIFO 50, default 0.08 A placeholder, buffered N=1 CSV.
+Three shuffled orders (seed 5087) were each followed by their reverse. Scheduler,
+priority and affinity were verified for every process: unpinned CPUs 0–3 versus
+pinned CPU 3. No deliberate background load or CPU isolation was applied. The
+10-second nominal runtime used temporary C++ source/binary and a Python runtime
+override; repository defaults and existing logs were not changed. All runs exited
+zero with exactly 10,000 samples; no interval exceeded 2 ms.
+
+The table reports medians of six per-run statistics, except the worst column,
+which is the largest interval across all six runs. It is not a pooled p99.
+
+| Client | Affinity | Median interval mean (ms) | Median interval p99 (ms) | Worst interval (ms) | Median SPI p99 (ms) | Median CPU |
+| ------ | -------- | ------------------------: | -----------------------: | ------------------: | ------------------: | ---------: |
+| C++    | Unpinned |                    1.0015 |                   1.0061 |              1.0895 |              0.1586 |      5.52% |
+| C++    | Core 3   |                    1.0014 |                   1.0045 |              1.1104 |              0.1576 |      5.48% |
+| Python | Unpinned |                    1.0024 |                   1.0124 |              1.2120 |              0.1736 |      6.53% |
+| Python | Core 3   |                    1.0022 |                   1.0076 |              1.1234 |              0.1689 |      6.46% |
+
+Pinned p99 was lower in 4/6 C++ and 5/6 Python pairs. Pinned maximum was lower in
+only 2/6 C++ and 4/6 Python pairs. Intervals above 1.1 ms totaled 0 versus 1 for
+C++, and 7 versus 1 for Python (unpinned versus pinned; 59,994 intervals per
+condition). This supports optional pinning for a modest typical-tail improvement,
+especially Python, not a claim of reliable worst-case improvement or core
+exclusivity. Six short repeats on this Pi do not establish behavior under a future
+controller workload or explain the earlier 4 ms outlier. Default commands remain
+unpinned; README includes optional pinned commands.
+
+Raw CSVs, run order, temporary native source/binary and per-run results are in
+`/tmp/mpc-affinity-study-rkoh3vno/` on this Pi; these temporary artifacts are not
+committed. No source/runtime changes were required by the comparison.
 
 ## Current decision
 

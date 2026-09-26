@@ -7,7 +7,8 @@
 #ifndef IIR_FILTER_H_
 #define IIR_FILTER_H_
 
-class IIRFilter {
+class IIRFilter
+{
 public:
     explicit IIRFilter() {};
     virtual ~IIRFilter() = default;
@@ -44,12 +45,12 @@ public:
     float applyConstrained(const float input, const float yMin, const float yMax);
 
 private:
-    struct IIRFilterParams{
+    struct IIRFilterParams {
         unsigned order;
-        float A[2]; // [a1, a2], a0 is always 1.0
-        float B[3]; // [b0, b1, b2]
-        float w[2]; // [w1, w2]
-    } filter;
+        float A[2];                                              // [a1, a2], a0 is always 1.0
+        float B[3];                                              // [b0, b1, b2]
+        float w[2];                                              // [w1, w2]
+    } filter{1, {0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}}; // Identity until init.
 
     void applyFilterUpdate(const float input, const float output);
 };

@@ -3,7 +3,7 @@
 #include <math.h>
 
 #ifndef M_PIf
-    #define M_PIf 3.14159265358979323846f // pi
+#define M_PIf 3.14159265358979323846f // pi
 #endif
 
 // Integrator
@@ -100,8 +100,8 @@ void IIRFilter::leadLag1Update(const float fZero, const float fPole, const float
     const float wPole = (2.0f / Ts) * tanf(M_PIf * fPole * Ts);
     const float k = 1.0f / (Ts * wPole + 2.0f);
 
-    filter.B[0] = wPole * (Ts*wZero + 2.0f) / wZero * k;
-    filter.B[1] = wPole * (Ts*wZero - 2.0f) / wZero * k;
+    filter.B[0] = wPole * (Ts * wZero + 2.0f) / wZero * k;
+    filter.B[1] = wPole * (Ts * wZero - 2.0f) / wZero * k;
     filter.B[2] = 0.0f;
     filter.A[0] = (Ts * wPole - 2.0f) * k;
     filter.A[1] = 0.0f;
@@ -151,7 +151,7 @@ void IIRFilter::notchUpdate(const float fcut, const float D, const float Ts)
 
 // Second Order Lowpass Filter
 // Time continous prototype: G(s) = wcut^2 / (s^2 + 2 * D * wcut * s + wcut^2)
-// Disrectization method: Euler
+// Discretization method: backward Euler
 
 void IIRFilter::lowPass2Init(const float fcut, const float D, const float Ts)
 {
@@ -164,7 +164,7 @@ void IIRFilter::lowPass2Update(const float fcut, const float D, const float Ts)
 {
     const float wcut = 2.0f * M_PIf * fcut;
     const float k1 = 2.0f * D * Ts * wcut;
-        
+
     filter.A[1] = 1.0f / (Ts * Ts * wcut * wcut + k1 + 1.0f);
     filter.B[0] = 1.0f - filter.A[1] * (1.0f + k1);
     filter.B[1] = 0.0f;
@@ -173,8 +173,8 @@ void IIRFilter::lowPass2Update(const float fcut, const float D, const float Ts)
 }
 
 // Second Order Lead or Lag Filter
-// Time continous prototype: G(s) = (wPole^2 / wZero^2) * (s^2 + 2*DZero*wZero*s + wZero^2) / (s^2 + 2*DPole*wPole*s + wPole^2)
-// Disrectization method: Tustin with prewarping
+// Time continous prototype: G(s) = (wPole^2 / wZero^2) * (s^2 + 2*DZero*wZero*s + wZero^2) / (s^2 + 2*DPole*wPole*s +
+// wPole^2) Disrectization method: Tustin with prewarping
 
 void IIRFilter::leadLag2Init(const float fZero, const float DZero, const float fPole, const float DPole, const float Ts)
 {
@@ -183,7 +183,8 @@ void IIRFilter::leadLag2Init(const float fZero, const float DZero, const float f
     reset(0.0f);
 }
 
-void IIRFilter::leadLag2Update(const float fZero, const float DZero, const float fPole, const float DPole, const float Ts)
+void IIRFilter::leadLag2Update(
+    const float fZero, const float DZero, const float fPole, const float DPole, const float Ts)
 {
     // prewarp is done implicitly
     const float omegaZero = 2.0f * M_PIf * fZero * Ts;
@@ -194,7 +195,7 @@ void IIRFilter::leadLag2Update(const float fZero, const float DZero, const float
     const float csPole = cosf(omegaPole);
     const float k0 = 1.0f / (1.0f + DPole * snPole);
     const float k1 = k0 * (csPole - 1.0f) / (csZero - 1.0f);
-                
+
     filter.B[0] = (1.0f + DZero * snZero) * k1;
     filter.B[1] = -2.0f * csZero * k1;
     filter.B[2] = (1.0f - DZero * snZero) * k1;
@@ -203,6 +204,8 @@ void IIRFilter::leadLag2Update(const float fZero, const float DZero, const float
     // filter.A[1] = filter.B[0] + filter.B[1] + filter.B[2] - 1.0f - filter.A[0];
 }
 
+// Steady-state reset for unity-DC-gain filters (LP/notch/lead-lag).
+// Use resetDifferentingFilterToZero for differentiators.
 void IIRFilter::reset(const float output)
 {
     filter.w[0] = output * (1.0f - filter.B[0]);
@@ -213,10 +216,7 @@ void IIRFilter::reset(const float output)
 // Assuming a constant input, differentiating results in zero output
 // Currently only implemented for first order differentiators
 
-void IIRFilter::resetDifferentingFilterToZero(const float output)
-{
-    filter.w[0] = output * filter.B[1];
-}
+void IIRFilter::resetDifferentingFilterToZero(const float output) { filter.w[0] = output * filter.B[1]; }
 
 float IIRFilter::apply(const float input)
 {
@@ -230,9 +230,9 @@ float IIRFilter::applyConstrained(const float input, const float yMin, const flo
 {
     // constrain output
     const float outputUnconstrained = filter.B[0] * input + filter.w[0];
-    const float output = (outputUnconstrained < yMin) ? yMin
-                       : (outputUnconstrained > yMax) ? yMax
-                       :  outputUnconstrained;
+    const float output = (outputUnconstrained < yMin)   ? yMin
+                         : (outputUnconstrained > yMax) ? yMax
+                                                        : outputUnconstrained;
     applyFilterUpdate(input, output);
 
     return output;

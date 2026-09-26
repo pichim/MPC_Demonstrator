@@ -8,8 +8,8 @@
 #include <stdexcept>
 
 namespace protocol {
-using Frame = std::array<uint8_t, 14>;
-using Measurements = std::array<float, 3>;
+using Frame = std::array<uint8_t, 18>;
+using Measurements = std::array<float, 4>;
 constexpr uint8_t Read = 0x57, Command = 0x55, Reply = 0x45;
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559);
 

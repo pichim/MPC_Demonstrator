@@ -2,9 +2,9 @@
 
 #include <chrono>
 
-#include "CurrentCommand.h"
 #include "IIRFilter.h"
 #include "IO_handler.h"
+#include "MotorCommand.h"
 #include "PIDCntrl.h"
 #include "SPISlaveDMA.h"
 #include "ThreadFlag.h"
@@ -17,11 +17,11 @@
 
 using namespace std::chrono;
 
-class fast_realtime_thread
+class MotorControlThread
 {
 public:
-    fast_realtime_thread(IO_handler &io, SpiSlaveDMA &spi, float Ts);
-    virtual ~fast_realtime_thread();
+    MotorControlThread(IO_handler &io, SpiSlaveDMA &spi, float Ts);
+    virtual ~MotorControlThread();
     bool start_loop(void);
 
 private:
@@ -31,7 +31,8 @@ private:
     float Ts;
     IO_handler &io_handler;
     SpiSlaveDMA &spi;
-    IIRFilter notchEncoders[2];
+    IIRFilter positionNotch;
+    IIRFilter velocityNotch;
     IIRFilter lowPass2CurrentSetpoint;
     PIDCntrl pidCntrl;
 

@@ -10,11 +10,14 @@ import time
 SPI_HEADER_READ = 0x57
 SPI_HEADER_COMMAND = 0x55
 SPI_HEADER_REPLY = 0x45
-SPI_NUM_FLOATS = 3
-SPI_MSG_SIZE = 14
+SPI_NUM_FLOATS = 4
+SPI_MSG_SIZE = 18
 SPI_SPEED_HZ = 30_000_000
 PERIOD_US = 1000
-CURRENT_A = 0.08
+SETPOINT = 0.08  # A in current mode, V in voltage mode.
+MODE = 0  # 0: current setpoint, 1: direct voltage.
+CURRENT_LIMIT_A = 1.0  # Host current-command limit; keep aligned with C++ host.
+VOLTAGE_LIMIT_V = 24.0  # MCU supply minus compensation; keep aligned with config.h.
 Trun = 20.0  # Nominal seconds; converted to a rounded integer cycle count.
 PRINT_EVERY = 1  # Samples per report after stopping; 0 prints one overall window.
 
@@ -47,17 +50,17 @@ def crc8(data):
 
 
 def frame(header, values):
-    data = bytes([header]) + struct.pack("<3f", *values)
+    data = bytes([header]) + struct.pack("<4f", *values)
     return data + bytes([crc8(data)])
 
 
-READ_FRAME = frame(SPI_HEADER_READ, (0.0, 0.0, 0.0))
+READ_FRAME = frame(SPI_HEADER_READ, (0.0, 0.0, 0.0, 0.0))
 
 
 def decode_reply(reply):
     if len(reply) != SPI_MSG_SIZE or reply[0] != SPI_HEADER_REPLY or crc8(reply[:-1]) != reply[-1]:
         raise RuntimeError("Invalid SPI reply (length/header/CRC); stopping.")
-    values = struct.unpack("<3f", reply[1:-1])
+    values = struct.unpack("<4f", reply[1:-1])
     if not all(math.isfinite(value) for value in values):
         raise RuntimeError("Non-finite SPI measurement; stopping.")
     return values
@@ -67,25 +70,29 @@ def read_measurements(spi):
     return decode_reply(spi.transfer(READ_FRAME))
 
 
-def send_command(spi, current, enable):
+def send_command(spi, setpoint, enable, mode=MODE):
     # Reply is prepared before receipt of this command; not an application ACK.
-    return decode_reply(spi.transfer(frame(SPI_HEADER_COMMAND, (current, float(enable), 0.0))))
+    return decode_reply(spi.transfer(frame(SPI_HEADER_COMMAND, (setpoint, float(enable), float(mode), 0.0))))
 
 
-def exchange(spi, current, enable):
+def exchange(spi, setpoint, enable, mode=MODE):
     measurements = read_measurements(spi)
-    send_command(spi, current, enable)
+    send_command(spi, setpoint, enable, mode)
     return measurements
 
 
 def make_log():
-    if not math.isfinite(Trun) or Trun <= 0 or not isinstance(PERIOD_US, int) or PERIOD_US <= 0 or not isinstance(PRINT_EVERY, int) or PRINT_EVERY < 0 or not math.isfinite(CURRENT_A) or abs(CURRENT_A) > 3.4028234663852886e38:
-        raise ValueError("Invalid runtime, period, reporting interval or current")
+    if not math.isfinite(Trun) or Trun <= 0 or not isinstance(PERIOD_US, int) or PERIOD_US <= 0 or not isinstance(PRINT_EVERY, int) or PRINT_EVERY < 0 or not math.isfinite(SETPOINT) or abs(SETPOINT) > 3.4028234663852886e38:
+        raise ValueError("Invalid runtime, period, reporting interval or setpoint")
+    if MODE not in (0, 1) or not math.isfinite(CURRENT_LIMIT_A) or CURRENT_LIMIT_A <= 0 or not math.isfinite(VOLTAGE_LIMIT_V) or VOLTAGE_LIMIT_V <= 0:
+        raise ValueError("Invalid mode or command limits")
     capacity = math.floor(Trun * 1_000_000 / PERIOD_US + 0.5)
     if capacity < 1:
         raise ValueError("Trun must round to at least one cycle")
-    # Fixed storage; add sensor/command arrays here when data logging is needed.
-    return {"dt": array("d", [0.0]) * capacity, "spi": array("d", [0.0]) * capacity, "count": 0}
+    # Fixed storage for timing, READ telemetry and the subsequently sent command.
+    log = {name: array("d", [0.0]) * capacity for name in ("dt", "spi", "time_s", "voltage_V", "current_A", "motor_position_rad", "motor_velocity_rad_s", "sent_setpoint", "sent_enable", "sent_mode")}
+    log["count"] = 0
+    return log
 
 
 def run(spi, log=None):
@@ -93,22 +100,34 @@ def run(spi, log=None):
         log = make_log()
     period = PERIOD_US / 1_000_000
     previous = None
+    run_start = time.perf_counter()
     enabled = False
     while log["count"] < len(log["spi"]):
         start = time.perf_counter()
-        motor, pendulum, measured_current = read_measurements(spi)
+        voltage, current, position, velocity = read_measurements(spi)
         read_end = time.perf_counter()
         # Future controller computation belongs here, after receiving sensors.
-        current = CURRENT_A if enabled else 0.0
+        mode = MODE
+        setpoint = SETPOINT if enabled else 0.0
+        limit = CURRENT_LIMIT_A if mode == 0 else VOLTAGE_LIMIT_V
+        setpoint = max(-limit, min(limit, setpoint))
         command_start = time.perf_counter()
-        send_command(spi, current, enabled)
+        send_command(spi, setpoint, enabled, mode)
         now = time.perf_counter()
         i = log["count"]
         log["dt"][i] = (now - previous) * 1000 if previous is not None else 0.0
         log["spi"][i] = (read_end - start + now - command_start) * 1000
+        log["time_s"][i] = read_end - run_start
+        log["voltage_V"][i] = voltage
+        log["current_A"][i] = current
+        log["motor_position_rad"][i] = position
+        log["motor_velocity_rad_s"][i] = velocity
+        log["sent_setpoint"][i] = setpoint
+        log["sent_enable"][i] = enabled
+        log["sent_mode"][i] = mode
         log["count"] = i + 1
         previous = now
-        enabled = True  # First exchange always sends zero current, disabled.
+        enabled = True  # First exchange always sends zero setpoint, disabled.
         remaining = start + period - time.perf_counter()
         if remaining > 0:
             time.sleep(remaining)
@@ -118,7 +137,8 @@ def report(log, cpu_s, wall_s):
     # Formatting and output happen only after the final disable and SPI close.
     count = log["count"]
     writer = csv.writer(sys.stdout, lineterminator="\n")
-    writer.writerow(["cycle", "dt_n", "dt_min_ms", "dt_mean_ms", "dt_max_ms", "spi_n", "spi_min_ms", "spi_mean_ms", "spi_max_ms", "cpu_s", "wall_s"])
+    data_fields = ["time_s", "voltage_V", "current_A", "motor_position_rad", "motor_velocity_rad_s", "sent_setpoint", "sent_enable", "sent_mode"]
+    writer.writerow(["cycle", "dt_n", "dt_min_ms", "dt_mean_ms", "dt_max_ms", "spi_n", "spi_min_ms", "spi_mean_ms", "spi_max_ms", "cpu_s", "wall_s"] + data_fields)
     for first in range(0, count, PRINT_EVERY or max(count, 1)):
         last = min(first + (PRINT_EVERY or count), count)
         fields = [last]
@@ -130,7 +150,10 @@ def report(log, cpu_s, wall_s):
             else:
                 fields.extend(["0.0000"] * 3)
         # Run totals repeated as metadata, not per-window CPU measurements.
-        writer.writerow(fields + [f"{cpu_s:.4f}", f"{wall_s:.4f}"])
+        # With grouped timing windows, data columns show the final cycle.
+        data = [format(log[name][last - 1], ".6f") for name in data_fields[:-2]]
+        data += [int(log[name][last - 1]) for name in data_fields[-2:]]
+        writer.writerow(fields + [f"{cpu_s:.4f}", f"{wall_s:.4f}"] + data)
 
 
 def main():

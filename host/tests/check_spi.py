@@ -40,11 +40,11 @@ def main():
         average_ms = run(spi, args.count, args.period_us / 1e6)
         print(f"PASS baseline: {args.count} exchanges, {args.speed} Hz SPI, " f"{args.period_us} us target period, NSS, actual mean cycle={average_ms:.3f} ms", flush=True)
         if args.faults:
-            disabled = protocol.frame(protocol.SPI_HEADER_COMMAND, (0.0, 0.0, 0.0))
+            disabled = protocol.frame(protocol.SPI_HEADER_COMMAND, (0.0, 0.0, 0.0, 0.0))
             bad_crc = disabled[:-1] + bytes([disabled[-1] ^ 1])
-            cases = [(f"{size}-byte frame", (disabled * 2)[:size]) for size in (1, 7, 13, 15, 28)]
+            cases = [(f"{size}-byte frame", (disabled * 2)[:size]) for size in (1, 9, 17, 19, 36)]
             cases.append(("bad CRC", bad_crc))
-            cases.append(("unknown header", protocol.frame(0x7F, (0.0, 0.0, 0.0))))
+            cases.append(("unknown header", protocol.frame(0x7F, (0.0, 0.0, 0.0, 0.0))))
             for iteration in range(args.fault_rounds):
                 for label, frame in cases:
                     spi.transfer(frame)

@@ -27,6 +27,8 @@ public:
     virtual ~PIDCntrl() = default;
 
     void reset(float initValue = 0.0f);
+    // Preload integrator and feedback/output history without taking a control step.
+    void trackOutput(float output, float error, float measurement);
 
     void setup(float I, float Ts, float uMin, float uMax);
     void setup(float P, float I, float Ts, float uMin, float uMax);

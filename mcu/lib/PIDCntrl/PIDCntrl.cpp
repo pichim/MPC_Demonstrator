@@ -42,6 +42,16 @@ void PIDCntrl::reset(float initValue)
     uf = initValue;
 }
 
+void PIDCntrl::trackOutput(float output, float error, float measurement)
+{
+    output = saturate(output, uMin, uMax);
+    IPart = saturate(output - P * error, uIMin, uIMax);
+    Dpart = 0.0f;
+    d_old = measurement;
+    u_old = output;
+    uf = output;
+}
+
 void PIDCntrl::setup(float I, float Ts, float uMin, float uMax)
 {
     P = 0.0f;

@@ -162,8 +162,8 @@ bool SpiSlaveDMA::start() {
     return m_Thread.start(callback(this, &SpiSlaveDMA::threadTask)) == osOK;
 }
 
-void SpiSlaveDMA::setReplyData(float motor_angle, float pendulum_angle, float current) {
-    const float values[SPI_NUM_FLOATS] = {motor_angle, pendulum_angle, current};
+void SpiSlaveDMA::setReplyData(float voltage, float current, float position, float velocity) {
+    const float values[SPI_NUM_FLOATS] = {voltage, current, position, velocity};
     core_util_critical_section_enter();
     std::memcpy(m_reply_data, values, sizeof(values));
     core_util_critical_section_exit();

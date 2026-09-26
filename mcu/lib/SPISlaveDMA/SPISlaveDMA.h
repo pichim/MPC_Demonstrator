@@ -22,7 +22,7 @@ using namespace std::chrono;
 #define SPI_HEADER_MASTER   0x55 // publish (Pi->STM)
 #define SPI_HEADER_READ     0x57 // read-only (Pi->STM), zero payload
 #define SPI_HEADER_SLAVE    0x45 // data-from-STM (STM->Pi)
-#define SPI_NUM_FLOATS      3
+#define SPI_NUM_FLOATS      4
 #define SPI_MSG_SIZE        (1 + SPI_NUM_FLOATS * 4 + 1) // header + floats + crc
 
 // Single latest command; reception time is on the MCU microsecond ticker.
@@ -62,8 +62,9 @@ public:
     // Start in recovery; require NSS high before accepting its next falling edge.
     bool start();
 
-    // Update 3 floats (thread-safe; copied atomically into next TX frame)
-    void setReplyData(float f0, float f1, float f2);
+    // Update voltage (before compensation), current, position and velocity.
+    // Update 4 floats (thread-safe; copied atomically into next TX frame)
+    void setReplyData(float voltage, float current, float position, float velocity);
 
     // Atomically consume the latest command, if any. Intermediate commands
     // may be overwritten; there is no FIFO. Diagnostics are a separate snapshot.
@@ -104,7 +105,7 @@ private:
     SpiDiagnostics m_diagnostics;
     bool m_has_new_data{false};
 
-    // Dedicated DMA storage: the current task updates m_reply_data, never these.
+    // Dedicated DMA storage: the motor task updates m_reply_data, never these.
     alignas(4) uint8_t m_buffer_rx[SPI_MSG_SIZE];
     alignas(4) uint8_t m_buffer_tx[SPI_MSG_SIZE];
 

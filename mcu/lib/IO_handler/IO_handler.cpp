@@ -2,8 +2,11 @@
 
 // constructors
 IO_handler::IO_handler(void)
-    : encoder_motor(MPC_MOTOR_ENCODER_A_PIN, MPC_MOTOR_ENCODER_B_PIN, MPC_ENCODER_MOTOR_COUNTS_PER_TURN)
-    , encoder_pendulum(MPC_PENDULUM_ENCODER_A_PIN, MPC_PENDULUM_ENCODER_B_PIN, MPC_ENCODER_PENDULUM_COUNTS_PER_TURN)
+    : encoder_motor(MPC_MOTOR_ENCODER_A_PIN,
+                    MPC_MOTOR_ENCODER_B_PIN,
+                    MPC_ENCODER_MOTOR_COUNTS_PER_TURN,
+                    MPC_VELOCITY_F_CUT_HZ,
+                    MPC_FAST_RT_PERIOD_US * 1.0e-6f)
     , pwm(MPC_MOTOR_PWM_PIN)
     , pwm_val(0.0f)
     , dir(MPC_MOTOR_DIR_PIN)

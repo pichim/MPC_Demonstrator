@@ -14,13 +14,19 @@ def summarize(path):
     with path.open(newline="") as source:
         reader = csv.DictReader(source)
         expected = ["cycle", "dt_n", "dt_min_ms", "dt_mean_ms", "dt_max_ms", "spi_n", "spi_min_ms", "spi_mean_ms", "spi_max_ms", "cpu_s", "wall_s"]
-        if reader.fieldnames != expected:
+        data_fields = ["time_s", "voltage_V", "current_A", "motor_position_rad", "motor_velocity_rad_s", "sent_setpoint", "sent_enable", "sent_mode"]
+        if reader.fieldnames not in (expected, expected + data_fields):
             print("Invalid CSV header; regenerate this log.")
             return False
         for row in reader:
             try:
                 if None in row or any(value is None for value in row.values()):
                     raise ValueError("wrong number of columns")
+                if "time_s" in row:
+                    if not all(math.isfinite(float(row[key])) for key in data_fields):
+                        raise ValueError("non-finite motor data")
+                    if float(row["time_s"]) < 0 or row["sent_enable"] not in ("0", "1") or row["sent_mode"] not in ("0", "1"):
+                        raise ValueError("invalid timestamp, enable or mode")
                 cycle, spi_n, dt_n = (int(row[key]) for key in ("cycle", "spi_n", "dt_n"))
                 if spi_n <= 0 or cycle != previous_cycle + spi_n:
                     raise ValueError("missing, duplicated or out-of-order cycles")
