@@ -1,4 +1,5 @@
 {
-   "cmake.buildDirectory": "${workspaceFolder}/build/${variant:board}-${variant:buildType}",
-   "cmake.generator": "Ninja"
+   "cmake.buildDirectory": "${workspaceFolder}/mcu/build/${variant:board}-${variant:buildType}",
+   "cmake.generator": "Ninja",
+   "cmake.sourceDirectory": "${workspaceFolder}/mcu"
 }

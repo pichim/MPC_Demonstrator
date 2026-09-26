@@ -10,6 +10,16 @@ physical measurement. The experiment history, failed approaches, timing tables,
 research sources and remaining limitations are in
 [Development and validation](docs/DEVELOPMENT.md).
 
+## Repository layout
+
+- `mcu/`: firmware, local Mbed dependency, MCU tests, and MCU build output.
+- `host/`: C++ and Python clients, host tests, and host build output.
+- `docs/`: development and validation records.
+
+Terminal builds belong in `mcu/build` and `host/build`; VS Code uses
+`mcu/build/NUCLEO_F446RE-Develop` for the MCU.
+Historical local checkpoints remain in `mcu/build/checkpoints/`.
+
 ## Wiring
 
 Power off before rewiring. Use short 3.3 V signal wires and common ground;
@@ -29,15 +39,37 @@ may remain connected, but the old clients are incompatible with this firmware.
 
 ## Build and run
 
-Use the existing Mbed CE / Arm toolchain and local `mbed-os` checkout:
+Run these commands from the repository root. The MCU commands use the existing
+Arm toolchain and Python environment installed on this Pi, with the same
+**NUCLEO_F446RE / Develop** settings as the default VS Code build:
 
 ```sh
-cmake -S . -B build/NUCLEO_F446RE-Develop
-cmake --build build/NUCLEO_F446RE-Develop --target MPC_Demonstrator -j2
+export PATH=/usr/local/gcc-arm/bin:$PATH
+
+cmake -S mcu -B mcu/build -G Ninja \
+  -DMBED_TARGET=NUCLEO_F446RE \
+  -DCMAKE_BUILD_TYPE=Develop \
+  -DUPLOAD_METHOD=MBED \
+  -DPython3_EXECUTABLE="$PWD/mcu/mbed-os/venv/bin/python3"
+
+cmake --build mcu/build --target MPC_Demonstrator -j2
 ```
 
-Stop SPI clients before flashing. Use the VS Code flash task, or copy
-`build/NUCLEO_F446RE-Develop/MPC_Demonstrator.bin` onto the `NOD_F446RE` drive.
+**Ctrl+Shift+B also flashes the board.** To build and flash from the terminal,
+stop SPI clients and mount the Nucleo drive first (the VS Code **Mount NUCLEO**
+task can do this), then run:
+
+```sh
+cmake --build mcu/build --target flash-MPC_Demonstrator -j2
+```
+
+Alternatively, copy `mcu/build/MPC_Demonstrator.bin` onto the `NOD_F446RE` drive.
+
+VS Code uses `.vscode/cmake-variants.yaml` for the MCU board and build type,
+and builds in `mcu/build/NUCLEO_F446RE-Develop`. Replace `mcu/build` with that
+path in the commands above to share its build directory. Otherwise, the terminal
+and VS Code maintain separate build outputs.
+
 Reconfigure CMake after adding/removing library sources; its source glob is
 resolved at configure time.
 
@@ -48,20 +80,20 @@ Run **only one client at a time**.
 Python uses only its standard library:
 
 ```sh
-sudo chrt -f 50 python3 -u python/main.py 2>&1 | tee spi_timing.txt
+sudo chrt -f 50 python3 -u host/python/main.py 2>&1 | tee host/spi_timing.txt
 ```
 
 It targets **1 kHz**, requests **30 MHz SPI mode 0**, and sends **0.08 A enabled**
-after the first zero-current disabled cycle. Edit settings in `python/main.py`.
+after the first zero-current disabled cycle. Edit settings in `host/python/main.py`.
 `PRINT_EVERY = 500` prints every 500 cycles; set it to zero to omit periodic
 printing and interval collection. Ctrl+C attempts a final disable and closes SPI.
 
 For quieter timing measurements and the future native controller:
 
 ```sh
-cmake -S host -B build/host -DCMAKE_BUILD_TYPE=Release
-cmake --build build/host -j2
-sudo chrt -f 50 build/host/mpc_spi \
+cmake -S host -B host/build -DCMAKE_BUILD_TYPE=Release
+cmake --build host/build -j2
+sudo chrt -f 50 host/build/mpc_spi \
   --count 10000 --period-us 1000 --enable --csv /tmp/jitter-nss.csv
 ```
 
@@ -93,20 +125,21 @@ See the [matched results](docs/DEVELOPMENT.md#nss-results) for percentiles and l
 
 | Location | Responsibility |
 | --- | --- |
-| `include/config.h` | MCU pins, periods, priorities and controller settings |
-| `src/main.cpp` | Construct hardware/tasks and start them |
-| `lib/fast_realtime_thread/` | 50 µs High2 task: sensors, current control, outputs, expiry |
-| `lib/IO_handler/` | Encoders, current ADC, PWM, direction and enable |
-| `lib/SPISlaveDMA/` | NSS handlers, immutable DMA frame, latest-command mailbox, High1 recovery worker |
-| `python/main.py`, `python/spi_nss.py` | Python control-loop entry point and NSS transport |
+| `mcu/include/config.h` | MCU pins, periods, priorities and controller settings |
+| `mcu/src/main.cpp` | Construct hardware/tasks and start them |
+| `mcu/lib/fast_realtime_thread/` | 50 µs High2 task: sensors, current control, outputs, expiry |
+| `mcu/lib/IO_handler/` | Encoders, current ADC, PWM, direction and enable |
+| `mcu/lib/SPISlaveDMA/` | NSS handlers, immutable DMA frame, latest-command mailbox, High1 recovery worker |
+| `host/python/main.py`, `host/python/spi_nss.py` | Python control-loop entry point and NSS transport |
 | `host/main.cpp`, `host/spi_nss.h`, `host/protocol.h` | Native loop, NSS transport and protocol |
-| `tests/` | Host regression tests and disabled-command hardware checks |
+| `mcu/tests/` | MCU command-policy regression test |
+| `host/tests/` | Python regression tests and disabled-command hardware checks |
 
-Libraries inherited from the last commit remain in `lib/`, including currently
+Libraries inherited from the last commit remain in `mcu/lib/`, including currently
 unused utilities. They are retained for future coursework.
 
 Add Pi controller computation between READ and COMMAND at the marked location in
-`python/main.py` or `host/main.cpp`. The MCU current task owns controller/filter
+`host/python/main.py` or `host/main.cpp`. The MCU current task owns controller/filter
 state and outputs. Short critical sections protect coherent snapshots and the
 single latest command; there is no command queue or current-loop mutex.
 
@@ -116,7 +149,7 @@ a 14-byte full-duplex burst, with NSS low throughout. NSS rising validates and
 publishes the received command. The current task never writes the active DMA
 buffer. Before another exchange the client enforces at least **30 µs NSS high**;
 controller computation can cover that interval. Settings are in `host/config.h`
-and `python/spi_nss.py`; keep them aligned.
+and `host/python/spi_nss.py`; keep them aligned.
 
 There are exactly two useful bursts per cycle: **READ → compute → COMMAND**.
 No ARM transfer or extra signaling is used. Timing margins are minimum waits;
@@ -154,15 +187,16 @@ and the reserved fault input still need consideration before physical operation.
 Run regression checks without hardware:
 
 ```sh
-python3 -m unittest discover -s tests -v
-ctest --test-dir build/host --output-on-failure
+python3 -m unittest discover -s mcu/tests -v
+python3 -m unittest discover -s host/tests -v
+ctest --test-dir host/build --output-on-failure
 ```
 
 Run disabled-command hardware recovery checks, sequentially:
 
 ```sh
-sudo chrt -f 50 build/host/mpc_spi --count 10000 --period-us 500 --faults
-sudo chrt -f 50 python3 tests/check_spi.py --count 1000 --period-us 500 --faults
+sudo chrt -f 50 host/build/mpc_spi --count 10000 --period-us 500 --faults
+sudo chrt -f 50 python3 host/tests/check_spi.py --count 1000 --period-us 500 --faults
 ```
 
 Each injects short/extra frames, corrupt CRC, unknown header, cancellation and

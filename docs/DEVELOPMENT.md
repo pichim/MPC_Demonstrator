@@ -7,6 +7,13 @@ register checks are not physical actuator tests. See [README](../README.md) for
 current build/run instructions; historical commands below require their matching
 firmware and clients.
 
+## Repository layout note
+
+Historical paths below refer to the layout used during each experiment. Firmware
+now lives under `mcu/`, Python clients under `host/python/`, and host checks under
+`host/tests/`. Local checkpoints moved from `build/checkpoints/` to
+`mcu/build/checkpoints/`. Use the root [README](../README.md) for current commands.
+
 ## Current decision
 
 Keep NSS-framed normal DMA with immutable telemetry, two useful exchanges per
