@@ -15,7 +15,14 @@ fast_realtime_thread::fast_realtime_thread(IO_handler &io, SpiSlaveDMA &spi, flo
 
     lowPass2CurrentSetpoint.lowPass2Init(MPC_F_CUT_HZ, MPC_CURRENT_SETPOINT_DAMPING, Ts);
 
-    pidCntrl.setup(MPC_KP_I, MPC_KI_I, 0.0f, 0.0f, MPC_TAU_RO_I, Ts, (-MPC_POWERSUPPLY_VOLTAGE + MPC_OFFSET_VOLTAGE), (MPC_POWERSUPPLY_VOLTAGE - MPC_OFFSET_VOLTAGE));
+    pidCntrl.setup(MPC_KP_I,
+                   MPC_KI_I,
+                   0.0f,
+                   0.0f,
+                   MPC_TAU_RO_I,
+                   Ts,
+                   (-MPC_POWERSUPPLY_VOLTAGE + MPC_OFFSET_VOLTAGE),
+                   (MPC_POWERSUPPLY_VOLTAGE - MPC_OFFSET_VOLTAGE));
 
 #if MPC_PERFORM_GPA_MEAS
     // closed-loop measurement
@@ -67,7 +74,8 @@ void fast_realtime_thread::loop(void)
 
         // Disable the bridge before resetting PWM/controller state. On enable,
         // prepare direction and PWM first, then assert the bridge enable.
-        if (!command.enabled) io_handler.set_enable_motor(false);
+        if (!command.enabled)
+            io_handler.set_enable_motor(false);
 
         // Current controller
         if (command.enabled) {
@@ -105,7 +113,8 @@ void fast_realtime_thread::loop(void)
 
 bool fast_realtime_thread::start_loop(void)
 {
-    if (thread.start(callback(this, &fast_realtime_thread::loop)) != osOK) return false;
+    if (thread.start(callback(this, &fast_realtime_thread::loop)) != osOK)
+        return false;
     ticker.attach(callback(this, &fast_realtime_thread::sendSignal), microseconds{static_cast<int64_t>(Ts * 1e6f)});
     return true;
 }
@@ -119,7 +128,4 @@ float fast_realtime_thread::clamp(float val, float min, float max)
     return val;
 }
 
-void fast_realtime_thread::sendSignal()
-{
-    thread.flags_set(threadFlag);
-}
+void fast_realtime_thread::sendSignal() { thread.flags_set(threadFlag); }

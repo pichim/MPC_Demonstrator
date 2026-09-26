@@ -2,21 +2,20 @@
 
 #include <chrono>
 
+#include "CurrentCommand.h"
 #include "IIRFilter.h"
 #include "IO_handler.h"
 #include "PIDCntrl.h"
+#include "SPISlaveDMA.h"
 #include "ThreadFlag.h"
 #include "config.h"
 #include "mbed.h"
-#include "SPISlaveDMA.h"
-#include "CurrentCommand.h"
 
 #if MPC_PERFORM_GPA_MEAS
 #include "GPA.h"
 #endif
 
 using namespace std::chrono;
-
 
 class fast_realtime_thread
 {

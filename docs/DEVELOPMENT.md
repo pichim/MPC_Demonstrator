@@ -1,7 +1,7 @@
 # Communication development and validation record
 
 This is the consolidated record of the SPI experiments on the Raspberry Pi 5
-and NUCLEO-F446RE, through 2026-09-25. It includes unsuccessful experiments and
+and NUCLEO-F446RE, through 2026-09-26. It includes unsuccessful experiments and
 unresolved cases. The board has no motor or sensor hardware attached; output
 register checks are not physical actuator tests. See [README](../README.md) for
 current build/run instructions; historical commands below require their matching
@@ -13,6 +13,123 @@ Historical paths below refer to the layout used during each experiment. Firmware
 now lives under `mcu/`, Python clients under `host/python/`, and host checks under
 `host/tests/`. Local checkpoints moved from `build/checkpoints/` to
 `mcu/build/checkpoints/`. Use the root [README](../README.md) for current commands.
+
+## Host baseline evolution — 2026-09-26 (historical steps)
+
+Initially, Python `main.py` was restored byte-for-byte from commit `adeb639`. The native host
+kept `src/`, `include/`, and `lib/Spi/`, and followed Python's simple single-threaded
+READ → compute → COMMAND → print → sleep loop. At that stage both ran continuously, first sent
+a disabled command, then enabled the 0.08 A placeholder. Settings are Python
+variables/C++ defines; the threaded clients' run options and reporting queues are
+removed. Scheduling is selected externally with `chrt`. The MCU is unchanged.
+
+A temporary, instrumented comparison used three 10,000-cycle runs per variant,
+1 kHz, FIFO 50, reporting off, and disabled commands throughout. Mean cycle
+intervals were 1002.59–1002.90 µs for the original loop, 1005.37–1005.77 µs for the
+threaded Event.wait loop, and 1002.23–1002.40 µs when only that wait was replaced
+with time.sleep. Mean work stayed around 163–165 µs. Occasional long intervals
+also occurred in the original loop; these runs do not establish their cause.
+Temporary scripts and CSVs are in `/tmp/mpc-python-compare-ql6gs97q/` on this Pi.
+This comparison used disabled commands and differs from the live-output checks.
+
+Final hardware checks ran each client for 12 seconds with FIFO 50 and default
+live printing, then sent one SIGINT directly to the client. Both exited zero
+without reported SPI or final-disable errors. From the 23 printed windows per
+client (11,499 intervals; the final partial window is excluded):
+
+| Client | Mean interval (ms) | Maximum interval (ms) |
+| ------ | -----------------: | --------------------: |
+| python |           1.001988 |              1.106390 |
+| cpp    |           1.001495 |              1.045112 |
+
+Those logs were subsequently replaced by newer runs; the table records the
+results of that historical check.
+An earlier repeat using `timeout --signal=INT` reported an interrupted Python
+final-disable attempt despite exit zero; its cause was not established. The
+original Python shutdown behavior was retained at that stage. Native build/protocol test and
+all six Python tests passed; MCU sources were unchanged.
+
+The subsequent minimal reporting update moves C++ application settings into
+`host/src/main.cpp` and NSS constants into the transport header, removing the
+separate config header. Both clients add per-window SPI-call statistics and
+process CPU/wall seconds. `host/python/analyze_timing.py` summarizes sample-weighted
+interval/SPI statistics and elapsed-time-weighted CPU usage. Current logs are
+`host/spi_timing_python.txt` and `host/spi_timing_cpp.txt`; earlier results above
+predate this instrumentation.
+
+The current host now defaults to `Trun = 20` seconds. Both clients preallocate
+timing buffers and report only after stopping and closing SPI, including partial
+windows. CPU timing covers execution rather than reporting. Earlier measurements
+above used live printing and do not characterize this buffered implementation.
+
+The latest host conversion uses a rounded integer cycle count from `Trun` and
+`PERIOD_US` (20,000 cycles by default), rather than a wall-clock cutoff. Default
+`PRINT_EVERY = 1` exports every cycle after shutdown as CSV with unit-bearing
+headers. Run CPU/wall totals are repeated metadata, counted once by the analyzer.
+Historical text logs and measurements above predate this format.
+
+## Current host and commit validation
+
+The current Python/C++ baseline has the same settings and sequence: READ → compute
+→ COMMAND → record → sleep. Application settings live in each main file; NSS
+settings live in the transport files. No separate host config header, logging
+thread, queue or controller framework is needed. MCU files are unchanged.
+
+Both round `Trun * 1e6 / PERIOD_US` to the nearest integer (halves up), allocate two
+arrays before opening SPI, and complete that many cycles unless interrupted or an
+error occurs. The first command is disabled at zero current; subsequent commands
+use the 0.08 A placeholder. Final disable and SPI close precede CSV formatting.
+Default settings are 20 seconds nominal, 1000 µs, 30 MHz, and one cycle per CSV row.
+Actual elapsed time is not fixed. A controller belongs between READ and COMMAND.
+
+CSV field units, Python/MATLAB import examples, root-directory run commands and
+analyzer usage are in the [README](../README.md). P99 is linearly interpolated
+from individual samples; grouped logs cannot provide it. CPU/wall values are
+whole-run metadata, counted once. Times are rounded to four decimals. The first missing interval uses zero placeholders with `dt_n=0`, excluded from
+statistics. Empty runs produce only a header. Logs do not contain a target-count or success marker:
+check the process exit status and final cycle number, particularly after errors.
+`tee -i` preserves buffered output on Ctrl+C; Bash `pipefail` preserves failures.
+
+The native `protocol_test` and Python `test_protocol.py` were removed at the user's
+request; older test counts below are historical. The default build now contains
+only `mpc_spi`. Transport unit tests and the disabled-command recovery checker
+remain. Final review checks use temporary files, without adding test infrastructure.
+
+Before the final review fixes, sequential 60,000-cycle FIFO-50 hardware runs exited
+cleanly and produced these results (intervals include pacing; SPI sums both calls):
+
+| Client | Wall (s) | Interval mean/p99/max (ms) | SPI mean/p99/max (ms)    | CPU, one core |
+| ------ | -------: | -------------------------- | ------------------------ | ------------: |
+| C++    |  60.0927 | 1.0015 / 1.0071 / 1.2574   | 0.1552 / 0.1604 / 0.3654 |         5.52% |
+| Python |  60.1471 | 1.0024 / 1.0153 / 1.2196   | 0.1638 / 0.1800 / 0.4834 |         6.56% |
+
+These are observations, not deadline guarantees or physical actuator tests.
+
+Final review fixed only concrete issues: malformed/missing/duplicated CSV rows
+are rejected; loop errors are reported after the disable attempt; invalid settings
+are rejected before running; Python rejects unsupported CLI options; C++ detects
+CSV stream failures. Documentation now uses `tee -i` and Bash `pipefail`.
+
+Validation: clean Release build with warnings treated as errors; three host
+transport tests and one MCU command-policy test passed. Temporary checks confirmed
+byte-identical Python/C++ CSV for N=0/1/2, partial windows, rounded cycle counts,
+p99 interpolation, CPU metadata counted once, invalid CSV/settings rejection,
+and no output during the loop. Injected Python loop failure attempted disable
+and closed SPI before error/report output. No removed tests were reintroduced.
+
+Both final default hardware runs completed 20,000 cycles and exited zero:
+
+| Client | Wall (s) | Interval mean/p99/max (ms) | SPI mean/p99/max (ms)    | CPU, one core |
+| ------ | -------: | -------------------------- | ------------------------ | ------------: |
+| C++    |  20.0323 | 1.0016 / 1.0091 / 1.1389   | 0.1554 / 0.1631 / 0.2567 |         5.54% |
+| Python |  20.0508 | 1.0025 / 1.0166 / 1.5828   | 0.1637 / 0.1774 / 0.7439 |         6.59% |
+
+Process-group SIGINT checks through `tee -i` also exited zero and preserved valid
+partial CSVs (1,995 C++ and 1,974 Python samples), without reported SPI or shutdown
+errors. Default logs contain the final 20,000-cycle runs; the preceding 60,000-cycle
+logs were copied to `/tmp/mpc-final-review-60s-{cpp,python}.txt` on this Pi.
+Temporary validation files are not committed. MCU sources and firmware were not
+changed or flashed. MATLAB import is documented but was not executed here.
 
 ## Current decision
 
@@ -84,7 +201,7 @@ Sections 2–6 are historical records, preserved with their original figures and
 limitations. Words such as “current”, “next” or “remains flashed” in those sections
 refer to that checkpoint, not today's build. In particular REQUEST/READY, ARM,
 libgpiod and spidev Python-package instructions are superseded by NSS. Do not mix
-clients and firmware across those checkpoints. Current Python PRINT_EVERY is 500;
+clients and firmware across those checkpoints. At that historical checkpoint Python PRINT_EVERY was 500;
 historical tests that mention 100 used that earlier setting.
 
 The original working-tree baseline is local `origin/main` / HEAD `72ce22c`
@@ -141,12 +258,12 @@ Times below are µs. Percentiles pool samples across the three runs; CPU is the
 mean reported percentage of one core. `dt` is command-reply completion interval;
 `work` spans the READ start through COMMAND completion.
 
-| Transport | Target period | Mean work | p99 work | Max work | p99 dt | p99.9 dt | Max dt | CPU |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| REQUEST/READY | 1000 | 238.280 | 269.037 | 408.074 | 1050.536 | 1089.944 | 1171.666 | 4.22% |
-| NSS | 1000 | 155.269 | 160.352 | 280.630 | 1007.555 | 1022.111 | 1123.426 | 5.56% |
-| REQUEST/READY | 500 | 236.268 | 296.814 | 440.185 | 550.593 | 593.833 | 719.963 | 8.41% |
-| NSS | 500 | 155.290 | 158.167 | 209.481 | 504.759 | 512.889 | 555.685 | 11.02% |
+| Transport     | Target period | Mean work | p99 work | Max work |   p99 dt | p99.9 dt |   Max dt |    CPU |
+| ------------- | ------------: | --------: | -------: | -------: | -------: | -------: | -------: | -----: |
+| REQUEST/READY |          1000 |   238.280 |  269.037 |  408.074 | 1050.536 | 1089.944 | 1171.666 |  4.22% |
+| NSS           |          1000 |   155.269 |  160.352 |  280.630 | 1007.555 | 1022.111 | 1123.426 |  5.56% |
+| REQUEST/READY |           500 |   236.268 |  296.814 |  440.185 |  550.593 |  593.833 |  719.963 |  8.41% |
+| NSS           |           500 |   155.290 |  158.167 |  209.481 |  504.759 |  512.889 |  555.685 | 11.02% |
 
 Mean READ duration fell from about 107 µs to 60 µs. Mean work fell about 35%.
 No measured work exceeded its target period. Mean completion intervals remained
@@ -188,10 +305,10 @@ READ and COMMAND can cover some or all of that interval.
 With three additional bounded CPU-busy processes on the Pi, one 10,000-cycle run
 at each rate also passed:
 
-| Target period | Mean work | p99 work | Max work | p99 dt | Max dt | CPU |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1000 | 156.209 | 169.482 | 312.425 | 1014.130 | 1160.573 | 5.64% |
-| 500 | 155.501 | 163.556 | 184.981 | 509.241 | 527.871 | 11.10% |
+| Target period | Mean work | p99 work | Max work |   p99 dt |   Max dt |    CPU |
+| ------------- | --------: | -------: | -------: | -------: | -------: | -----: |
+| 1000          |   156.209 |  169.482 |  312.425 | 1014.130 | 1160.573 |  5.64% |
+| 500           |   155.501 |  163.556 |  184.981 |  509.241 |  527.871 | 11.10% |
 
 Both reported zero work-over-budget events. This load is CPU-only, not a complete
 stress test of storage, networking, IRQ interference or thermal behavior.
@@ -299,16 +416,16 @@ All values below are milliseconds, except CPU %. The 99th percentile describes
 successful-cycle completion intervals, not a guaranteed deadline. Maxima depend
 on exposure and host conditions; trials were sequential, not randomized.
 
-| Setup | Completed cycles / intervals* | Mean interval | p99 interval | Maximum | CPU % | Mean cycle work | Outcome |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Old ARM/COMMAND, three tasks | 7,799 | 1.002121 | 1.013723 | 1.076946 | — | — | 10/10 trials failed |
-| Handshake before thread cleanup | 29,880 | 1.002189 | 1.085668 | 1.935003 | — | — | 2 × 15 s passed |
-| Current handshake, earlier repeated test | 89,714 | 1.002296 | 1.051113 | 1.350206 | — | — | 3 × 30 s passed |
-| Current handshake, matched recorder | 30,000 | 1.002400 | 1.050797 | 1.259186 | 7.7 | 0.393 | 30,000 cycles passed |
-| Four frames, 100 us ARM + 100 us guard | 30,000 | 1.002363 | 1.012407 | 1.125130 | 34.9 | 0.426 | 3 × 10,000 normal cycles clean |
-| Four frames, 150 us ARM + 150 us guard | 30,000 | 1.002235 | 1.008518 | 1.098833 | 49.8 | 0.575 | 3 × 10,000 normal cycles clean |
-| Four frames, 200 us ARM + 200 us guard | 30,000 | 1.002290 | 1.013093 | 1.130797 | 64.8 | 0.726 | 3 × 10,000 normal cycles clean |
-| Four frames, 100/100 us extended run | 60,000 | 1.002278 | 1.010778 | 1.098945 | 34.9 | 0.425 | 60,000 cycles; all commands counted; zero recoveries |
+| Setup                                    | Completed cycles / intervals* | Mean interval | p99 interval |  Maximum | CPU % | Mean cycle work | Outcome                                              |
+| ---------------------------------------- | ----------------------------: | ------------: | -----------: | -------: | ----: | --------------: | ---------------------------------------------------- |
+| Old ARM/COMMAND, three tasks             |                         7,799 |      1.002121 |     1.013723 | 1.076946 |     — |               — | 10/10 trials failed                                  |
+| Handshake before thread cleanup          |                        29,880 |      1.002189 |     1.085668 | 1.935003 |     — |               — | 2 × 15 s passed                                      |
+| Current handshake, earlier repeated test |                        89,714 |      1.002296 |     1.051113 | 1.350206 |     — |               — | 3 × 30 s passed                                      |
+| Current handshake, matched recorder      |                        30,000 |      1.002400 |     1.050797 | 1.259186 |   7.7 |           0.393 | 30,000 cycles passed                                 |
+| Four frames, 100 us ARM + 100 us guard   |                        30,000 |      1.002363 |     1.012407 | 1.125130 |  34.9 |           0.426 | 3 × 10,000 normal cycles clean                       |
+| Four frames, 150 us ARM + 150 us guard   |                        30,000 |      1.002235 |     1.008518 | 1.098833 |  49.8 |           0.575 | 3 × 10,000 normal cycles clean                       |
+| Four frames, 200 us ARM + 200 us guard   |                        30,000 |      1.002290 |     1.013093 | 1.130797 |  64.8 |           0.726 | 3 × 10,000 normal cycles clean                       |
+| Four frames, 100/100 us extended run     |                        60,000 |      1.002278 |     1.010778 | 1.098945 |  34.9 |           0.425 | 60,000 cycles; all commands counted; zero recoveries |
 
 *Earlier repeated tests stored completed intervals rather than a separate cycle
 count; each run omits the initial interval. The legacy runs lasted only
@@ -318,22 +435,22 @@ ordinary-jitter difference is not solely an effect of exposure length.
 
 #### Four frames with ARM gaps only: failed experiment
 
-| ARM gap | Trials | Result |
-| --- | ---: | --- |
-| 100 us | 3 | All failed before the first complete read/command cycle |
-| 150 us | 3 | All failed after 1–183 complete cycles; frequent recoveries |
-| 200 us | 3 | All failed after 7–154 complete cycles; frequent recoveries |
-| 300 us | 3 × 10,000 cycles | Replies passed, but 10,082 / 10,117 / 10,084 MCU failures; one run published only 10,000 of 10,001 attempted commands |
+| ARM gap |            Trials | Result                                                                                                                |
+| ------- | ----------------: | --------------------------------------------------------------------------------------------------------------------- |
+| 100 us  |                 3 | All failed before the first complete read/command cycle                                                               |
+| 150 us  |                 3 | All failed after 1–183 complete cycles; frequent recoveries                                                           |
+| 200 us  |                 3 | All failed after 7–154 complete cycles; frequent recoveries                                                           |
+| 300 us  | 3 × 10,000 cycles | Replies passed, but 10,082 / 10,117 / 10,084 MCU failures; one run published only 10,000 of 10,001 attempted commands |
 
 These results are not successful reliability tests even where reply timing looks
 good. The added guard is a necessary distinction from the original proposal.
 
 #### 2 kHz comparison
 
-| Setup | Cycles | Mean interval ms | p99 ms | Mean work ms | Work >500 us | CPU % | Outcome |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Current handshake | 10,000 | 0.502310 | 0.550833 | 0.392276 | 0 | 15.5 | Transport passed; no measured cycle work over budget |
-| Four frames, 100/100 us | 10,000 | 0.523172 | 0.546908 | 0.521579 | 9,958 | 84.7 | Transport/counts passed; target period NOT sustained |
+| Setup                   | Cycles | Mean interval ms |   p99 ms | Mean work ms | Work >500 us | CPU % | Outcome                                              |
+| ----------------------- | -----: | ---------------: | -------: | -----------: | -----------: | ----: | ---------------------------------------------------- |
+| Current handshake       | 10,000 |         0.502310 | 0.550833 |     0.392276 |            0 |  15.5 | Transport passed; no measured cycle work over budget |
+| Four frames, 100/100 us | 10,000 |         0.523172 | 0.546908 |     0.521579 |        9,958 |  84.7 | Transport/counts passed; target period NOT sustained |
 
 The guarded implementation needs another guard at the cycle boundary when sleep
 no longer covers it. Its mean interval was about 523 us, approximately 1.91 kHz.
@@ -350,10 +467,10 @@ followed by idle. The deliberately idle case pauses 35 ms. Each case repeats thr
 times per setting.
 
 | ARM gap / guard | Recovery cases passed |
-| --- | ---: |
-| 100/100 us | 16/27 |
-| 150/150 us | 27/27 |
-| 200/200 us | 27/27 |
+| --------------- | --------------------: |
+| 100/100 us      |                 16/27 |
+| 150/150 us      |                 27/27 |
+| 200/200 us      |                 27/27 |
 
 At 100/100 us failures included truncated/oversized frames, bad CRC and unknown
 headers. An earlier continuous attempt at that setting also stopped before its
@@ -424,11 +541,11 @@ control, four READY waits averaged 314 us total; both SPI calls averaged 56 us.
 Cycle-start p99 was 1.0065 ms while completion p99 was 1.0521 ms. Normal jitter
 tracked handshake duration more strongly than sleep overshoot.
 
-| Temporary profiling variant | Cycles | Completion p99 ms | Mean work ms | Python CPU % |
-| --- | ---: | ---: | ---: | ---: |
-| Event waits, GC disabled | 15,000 | 1.052075 | 0.395299 | 8.52 |
-| GPIO polling, GC disabled | 15,000 | 1.052908 | 0.332722 | 29.61 |
-| Event waits, PCIe ASPM disabled, GC disabled | 15,000 | 1.050352 | 0.384102 | 7.96 |
+| Temporary profiling variant                  | Cycles | Completion p99 ms | Mean work ms | Python CPU % |
+| -------------------------------------------- | -----: | ----------------: | -----------: | -----------: |
+| Event waits, GC disabled                     | 15,000 |          1.052075 |     0.395299 |         8.52 |
+| GPIO polling, GC disabled                    | 15,000 |          1.052908 |     0.332722 |        29.61 |
+| Event waits, PCIe ASPM disabled, GC disabled | 15,000 |          1.050352 |     0.384102 |         7.96 |
 
 Two 30,000-cycle printing/quiet profiler runs and a 30,000-cycle GC-monitored run
 were also performed. The recorder itself introduced garbage-collection pauses;
@@ -479,12 +596,12 @@ No garbage-collector settings, kernel settings, or firmware settings were change
 decode, placeholder computation, COMMAND, and reply validation, excluding sleep.
 CPU is the arithmetic mean of the three runs, as a percentage of one core.
 
-| Target | Client | Mean dt (µs) | p99 dt (µs) | Max dt (µs) | Mean work (µs) | Work > period | CPU |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1000 Hz | python | 1002.339 | 1051.241 | 1270.260 | 392.531 | 0/30000 | 7.69% |
-| 1000 Hz | cpp | 1001.530 | 1049.945 | 1153.408 | 384.755 | 0/30000 | 4.20% |
-| 2000 Hz | python | 502.139 | 550.593 | 657.167 | 391.919 | 1/30000 | 15.21% |
-| 2000 Hz | cpp | 501.424 | 550.000 | 623.611 | 384.485 | 3/30000 | 8.38% |
+| Target  | Client | Mean dt (µs) | p99 dt (µs) | Max dt (µs) | Mean work (µs) | Work > period |    CPU |
+| ------- | ------ | -----------: | ----------: | ----------: | -------------: | ------------: | -----: |
+| 1000 Hz | python |     1002.339 |    1051.241 |    1270.260 |        392.531 |       0/30000 |  7.69% |
+| 1000 Hz | cpp    |     1001.530 |    1049.945 |    1153.408 |        384.755 |       0/30000 |  4.20% |
+| 2000 Hz | python |      502.139 |     550.593 |     657.167 |        391.919 |       1/30000 | 15.21% |
+| 2000 Hz | cpp    |      501.424 |     550.000 |     623.611 |        384.485 |       3/30000 |  8.38% |
 
 All 120,000 matched cycles passed reply validation. This does not prove every
 command was applied: the current protocol has no applied-command acknowledgement.
@@ -590,12 +707,12 @@ Three 10,000-cycle runs per firmware/rate, 120,000 cycles total, all valid.
 One additional pair overlapped compilation; its raw results were retained but
 excluded and the entire pair repeated without compilation.
 
-| Firmware / rate | Mean work | p99 work | Max work | p99 completion interval | Max completion interval |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Original / 1 kHz | 384.9 µs | 409.2 µs | 630.4 µs | 1049.9 µs | 1133.0 µs |
-| Original / 2 kHz | 384.7 µs | 409.2 µs | 521.9 µs | 550.0 µs | 610.8 µs |
-| Updated / 1 kHz | 237.7 µs | 292.7 µs | 476.5 µs | 1050.5 µs | 1231.7 µs |
-| Updated / 2 kHz | 238.1 µs | 297.2 µs | 377.6 µs | 550.8 µs | 683.5 µs |
+| Firmware / rate  | Mean work | p99 work | Max work | p99 completion interval | Max completion interval |
+| ---------------- | --------: | -------: | -------: | ----------------------: | ----------------------: |
+| Original / 1 kHz |  384.9 µs | 409.2 µs | 630.4 µs |               1049.9 µs |               1133.0 µs |
+| Original / 2 kHz |  384.7 µs | 409.2 µs | 521.9 µs |                550.0 µs |                610.8 µs |
+| Updated / 1 kHz  |  237.7 µs | 292.7 µs | 476.5 µs |               1050.5 µs |               1231.7 µs |
+| Updated / 2 kHz  |  238.1 µs | 297.2 µs | 377.6 µs |                550.8 µs |                683.5 µs |
 
 Mean work fell about 38%; mean READ completion fell from about 183 µs to
 108 µs. No updated-firmware work duration exceeded its requested period in

@@ -1,7 +1,5 @@
 #pragma once
 
-#include "config.h"
-#include "protocol.h"
 #include <cerrno>
 #include <fcntl.h>
 #include <linux/spi/spidev.h>
@@ -10,7 +8,10 @@
 #include <time.h>
 #include <unistd.h>
 
-inline long long monotonic_ns() {
+#include "protocol.h"
+
+inline long long monotonic_ns()
+{
     timespec time{};
     if (clock_gettime(CLOCK_MONOTONIC, &time) < 0)
         throw std::system_error(errno, std::generic_category(), "clock_gettime");
@@ -19,14 +20,19 @@ inline long long monotonic_ns() {
 
 // One ioctl asserts NSS, waits in the kernel without clocking bytes, exchanges
 // the payload, then releases NSS. No REQUEST/READY GPIO access is needed.
-class NssSPI {
+class NssSPI
+{
 public:
-    explicit NssSPI(unsigned speed) : speed_(speed) {
-        fd_ = open(config::spi_device, O_RDWR | O_CLOEXEC);
-        if (fd_ < 0) fail("open SPI");
+    explicit NssSPI(unsigned speed)
+        : speed_(speed)
+    {
+        if (speed < 1 || speed > 30'000'000)
+            throw std::invalid_argument("Invalid SPI speed");
+        fd_ = open("/dev/spidev0.0", O_RDWR | O_CLOEXEC);
+        if (fd_ < 0)
+            fail("open SPI");
         uint8_t mode = SPI_MODE_0, bits = 8;
-        if (ioctl(fd_, SPI_IOC_WR_MODE, &mode) < 0 ||
-            ioctl(fd_, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0 ||
+        if (ioctl(fd_, SPI_IOC_WR_MODE, &mode) < 0 || ioctl(fd_, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0 ||
             ioctl(fd_, SPI_IOC_WR_MAX_SPEED_HZ, &speed_) < 0) {
             const int error = errno;
             ::close(fd_);
@@ -35,35 +41,41 @@ public:
             fail("configure SPI");
         }
     }
-    ~NssSPI() { if (fd_ >= 0) ::close(fd_); }
-    NssSPI(const NssSPI&) = delete;
-    NssSPI& operator=(const NssSPI&) = delete;
+    ~NssSPI()
+    {
+        if (fd_ >= 0)
+            ::close(fd_);
+    }
+    NssSPI(const NssSPI &) = delete;
+    NssSPI &operator=(const NssSPI &) = delete;
 
-    protocol::Frame transfer(const protocol::Frame& tx) {
+    protocol::Frame transfer(const protocol::Frame &tx)
+    {
         protocol::Frame rx{};
         transfer_raw(tx.data(), rx.data(), tx.size());
         return rx;
     }
 
-    // Variable lengths are used only by the disabled-command fault test.
-    void transfer_raw(const uint8_t* tx, uint8_t* rx, unsigned length) {
-        exchange(tx, rx, length, config::nss_setup_us);
-    }
+    // Raw transfers are available for framing/recovery diagnostics.
+    void transfer_raw(const uint8_t *tx, uint8_t *rx, unsigned length) { exchange(tx, rx, length, SETUP_US); }
 
     // Assert NSS without clocks; optionally hold past the MCU's 20 ms timeout.
-    void cancel_selection(bool wait_for_timeout) {
-        exchange(nullptr, nullptr, 0, wait_for_timeout ? 35000 : config::nss_setup_us);
-    }
+    void cancel_selection(bool wait_for_timeout) { exchange(nullptr, nullptr, 0, wait_for_timeout ? 35000 : SETUP_US); }
 
 private:
-    [[noreturn]] static void fail(const char* operation) {
+    // Keep aligned with python/spi_nss.py.
+    static constexpr unsigned SETUP_US = 30, INACTIVE_US = 30;
+    [[noreturn]] static void fail(const char *operation)
+    {
         throw std::system_error(errno, std::generic_category(), operation);
     }
 
-    void exchange(const uint8_t* tx, uint8_t* rx, unsigned length, unsigned setup_us) {
+    void exchange(const uint8_t *tx, uint8_t *rx, unsigned length, unsigned setup_us)
+    {
         // ioctl returns after NSS release. This enforces a minimum high interval,
         // including between an immediate READ and COMMAND with no computation.
-        while (monotonic_ns() - last_end_ < config::nss_inactive_us * 1000LL) {}
+        while (monotonic_ns() - last_end_ < INACTIVE_US * 1000LL) {
+        }
         spi_ioc_transfer transfers[2]{};
         transfers[0].delay_usecs = setup_us; // zero bytes; CS stays asserted
         transfers[1].tx_buf = reinterpret_cast<uintptr_t>(tx);

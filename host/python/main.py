@@ -1,4 +1,7 @@
 """Pi SPI master for MPC Demonstrator. Run only with matching SPI firmware."""
+
+from array import array
+import csv
 import math
 import struct
 import sys
@@ -10,9 +13,10 @@ SPI_HEADER_REPLY = 0x45
 SPI_NUM_FLOATS = 3
 SPI_MSG_SIZE = 14
 SPI_SPEED_HZ = 30_000_000
-PERIOD_S = 1 / 1e3
+PERIOD_US = 1000
 CURRENT_A = 0.08
-PRINT_EVERY = 500  # Set to 0 to disable periodic printing and interval collection.
+Trun = 20.0  # Nominal seconds; converted to a rounded integer cycle count.
+PRINT_EVERY = 1  # Samples per report after stopping; 0 prints one overall window.
 
 
 CRC8_TAB = [
@@ -34,6 +38,7 @@ CRC8_TAB = [
     0xDE,0xD9,0xD0,0xD7,0xC2,0xC5,0xCC,0xCB,0xE6,0xE1,0xE8,0xEF,0xFA,0xFD,0xF4,0xF3
 ]
 
+
 def crc8(data):
     crc = 0
     for byte in data:
@@ -42,7 +47,7 @@ def crc8(data):
 
 
 def frame(header, values):
-    data = bytes([header]) + struct.pack('<3f', *values)
+    data = bytes([header]) + struct.pack("<3f", *values)
     return data + bytes([crc8(data)])
 
 
@@ -50,12 +55,11 @@ READ_FRAME = frame(SPI_HEADER_READ, (0.0, 0.0, 0.0))
 
 
 def decode_reply(reply):
-    if (len(reply) != SPI_MSG_SIZE or reply[0] != SPI_HEADER_REPLY
-            or crc8(reply[:-1]) != reply[-1]):
-        raise RuntimeError('Invalid SPI reply (length/header/CRC); stopping.')
-    values = struct.unpack('<3f', reply[1:-1])
+    if len(reply) != SPI_MSG_SIZE or reply[0] != SPI_HEADER_REPLY or crc8(reply[:-1]) != reply[-1]:
+        raise RuntimeError("Invalid SPI reply (length/header/CRC); stopping.")
+    values = struct.unpack("<3f", reply[1:-1])
     if not all(math.isfinite(value) for value in values):
-        raise RuntimeError('Non-finite SPI measurement; stopping.')
+        raise RuntimeError("Non-finite SPI measurement; stopping.")
     return values
 
 
@@ -74,59 +78,93 @@ def exchange(spi, current, enable):
     return measurements
 
 
-def run(spi):
+def make_log():
+    if not math.isfinite(Trun) or Trun <= 0 or not isinstance(PERIOD_US, int) or PERIOD_US <= 0 or not isinstance(PRINT_EVERY, int) or PRINT_EVERY < 0 or not math.isfinite(CURRENT_A) or abs(CURRENT_A) > 3.4028234663852886e38:
+        raise ValueError("Invalid runtime, period, reporting interval or current")
+    capacity = math.floor(Trun * 1_000_000 / PERIOD_US + 0.5)
+    if capacity < 1:
+        raise ValueError("Trun must round to at least one cycle")
+    # Fixed storage; add sensor/command arrays here when data logging is needed.
+    return {"dt": array("d", [0.0]) * capacity, "spi": array("d", [0.0]) * capacity, "count": 0}
+
+
+def run(spi, log=None):
+    if log is None:
+        log = make_log()
+    period = PERIOD_US / 1_000_000
     previous = None
-    intervals = []
-    count = 0
     enabled = False
-    print(f'SPI: {SPI_SPEED_HZ} Hz, mode 0, {SPI_MSG_SIZE}-byte frames; '
-          f'NSS; target {1 / PERIOD_S:g} Hz ({PERIOD_S * 1000:g} ms)', flush=True)
-    while True:
+    while log["count"] < len(log["spi"]):
         start = time.perf_counter()
         motor, pendulum, measured_current = read_measurements(spi)
+        read_end = time.perf_counter()
         # Future controller computation belongs here, after receiving sensors.
         current = CURRENT_A if enabled else 0.0
+        command_start = time.perf_counter()
         send_command(spi, current, enabled)
         now = time.perf_counter()
-        if PRINT_EVERY > 0:
-            if previous is not None:
-                intervals.append((now - previous) * 1000)
-            previous = now
-        count += 1
-        if PRINT_EVERY > 0 and count % PRINT_EVERY == 0:
-            timing = (f'  dt_avg={sum(intervals)/len(intervals):.6f} ms'
-                      f'  dt_min={min(intervals):.6f} ms'
-                      f'  dt_max={max(intervals):.6f} ms') if intervals else ''
-            # SPI telemetry was prepared before this command; this is not an ACK.
-            print(f'motor_angle={motor:.7g}  pendulum_angle={pendulum:.7g}'
-                  f'  current={measured_current:.7g}  sent_current_cmd={current}'
-                  f'  sent_enable={int(enabled)}{timing}', flush=True)
-            intervals.clear()
+        i = log["count"]
+        log["dt"][i] = (now - previous) * 1000 if previous is not None else 0.0
+        log["spi"][i] = (read_end - start + now - command_start) * 1000
+        log["count"] = i + 1
+        previous = now
         enabled = True  # First exchange always sends zero current, disabled.
-        remaining = start + PERIOD_S - time.perf_counter()
+        remaining = start + period - time.perf_counter()
         if remaining > 0:
             time.sleep(remaining)
 
 
+def report(log, cpu_s, wall_s):
+    # Formatting and output happen only after the final disable and SPI close.
+    count = log["count"]
+    writer = csv.writer(sys.stdout, lineterminator="\n")
+    writer.writerow(["cycle", "dt_n", "dt_min_ms", "dt_mean_ms", "dt_max_ms", "spi_n", "spi_min_ms", "spi_mean_ms", "spi_max_ms", "cpu_s", "wall_s"])
+    for first in range(0, count, PRINT_EVERY or max(count, 1)):
+        last = min(first + (PRINT_EVERY or count), count)
+        fields = [last]
+        for name in ("dt", "spi"):
+            values = log[name][max(first, 1) if name == "dt" else first : last]
+            fields.append(len(values))
+            if values:
+                fields.extend(f"{v:.4f}" for v in (min(values), sum(values) / len(values), max(values)))
+            else:
+                fields.extend(["0.0000"] * 3)
+        # Run totals repeated as metadata, not per-window CPU measurements.
+        writer.writerow(fields + [f"{cpu_s:.4f}", f"{wall_s:.4f}"])
+
+
 def main():
     from spi_nss import NssSPI
+
+    if len(sys.argv) != 1:
+        print("No run options: edit host/python/main.py.", file=sys.stderr)
+        return 1
+    log = make_log()
     spi = NssSPI(SPI_SPEED_HZ)
     status = 0
+    failure = None
+    wall_start, cpu_start = time.perf_counter(), time.process_time()
     try:
-        run(spi)
+        run(spi, log)
     except KeyboardInterrupt:
         pass
-    except (OSError, RuntimeError) as error:
-        print(error, file=sys.stderr, flush=True)
+    except Exception as error:
+        failure = error
         status = 1
     finally:
+        cpu_s = time.process_time() - cpu_start
+        wall_s = time.perf_counter() - wall_start
         try:
             send_command(spi, 0.0, False)
         except (OSError, RuntimeError, KeyboardInterrupt) as error:
-            print(f'Final disable unconfirmed: {error}', file=sys.stderr, flush=True)
+            print(f"Final disable unconfirmed: {error}", file=sys.stderr, flush=True)
+            status = 1
         spi.close()
+    if failure is not None:
+        print(failure, file=sys.stderr, flush=True)
+    report(log, cpu_s, wall_s)
     return status
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())
