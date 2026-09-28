@@ -106,6 +106,67 @@ For Python:
 sudo taskset -c 3 chrt -f 50 python3 -u host/python/main.py | tee -i host/spi_timing_python.txt
 ```
 
+### Optional CPU-core isolation
+
+CPU 3 can be excluded from normal scheduler load balancing and used for the pinned host control process. Default device interrupts are directed to CPUs 0–2. This can reduce scheduling jitter, although some interrupts and kernel activity can still occur on CPU 3.
+
+Create a backup and edit the kernel command line:
+
+```bash
+sudo cp /boot/firmware/cmdline.txt /boot/firmware/cmdline.txt.backup
+sudo nano /boot/firmware/cmdline.txt
+```
+
+Append the following parameters to the existing line:
+
+```text
+isolcpus=3 irqaffinity=0-2
+```
+
+The file must remain a single line. Reboot afterwards:
+
+```bash
+sudo reboot
+```
+
+Verify the configuration after rebooting:
+
+```bash
+cat /proc/cmdline
+cat /sys/devices/system/cpu/isolated
+cat /proc/irq/default_smp_affinity
+```
+
+The expected isolated CPU is `3`; the expected default interrupt mask for CPUs 0–2 is `7`.
+
+Check whether `irqbalance` is active:
+
+```bash
+systemctl is-active irqbalance
+```
+
+If it reports `active`, disable it so that it cannot redistribute interrupts onto CPU 3:
+
+```bash
+sudo systemctl disable --now irqbalance
+```
+
+The existing launch commands explicitly place the host process on the isolated core:
+
+```bash
+sudo taskset -c 3 chrt -f 50 host/build/mpc_spi \
+  | tee -i host/spi_timing_cpp.txt
+```
+
+```bash
+sudo taskset -c 3 chrt -f 50 python3 -u host/python/main.py \
+  | tee -i host/spi_timing_python.txt
+```
+
+CPU isolation is optional: the clients also run without it. It does not provide an interrupt-free core or turn the standard Raspberry Pi OS kernel into a PREEMPT_RT kernel.
+
+The checked kernel (`6.12.109+rpt-rpi-2712`) has `CONFIG_PREEMPT=y` and `CONFIG_NO_HZ_IDLE=y`, but `CONFIG_PREEMPT_RT` and `CONFIG_NO_HZ_FULL` are disabled. Full tickless support is a build-time option: adding `nohz_full=3` alone cannot enable it on this kernel. It requires building or installing a kernel with `CONFIG_NO_HZ_FULL=y`, then selecting CPU 3 with that boot parameter. It can suppress the periodic scheduler tick while a single task runs, but the host's sleep/wakeup and SPI operations still require kernel activity. See the [Linux NO_HZ documentation](https://www.kernel.org/doc/html/v6.12/timers/no_hz.html).
+
 Both run **20,000 cycles by default** (`Trun = 20` seconds of nominal runtime) at a target **1 kHz**, request **30 MHz SPI mode 0**, and
 send **0.08 A in current mode after the first zero-setpoint disabled cycle**. They stop automatically; **Ctrl+C** stops early. There are no command-line run options;
 edit Python's variables or C++'s defines and rebuild C++ after changes.

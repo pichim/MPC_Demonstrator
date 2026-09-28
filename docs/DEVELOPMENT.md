@@ -1,11 +1,29 @@
 # Communication development and validation record
 
 This is the consolidated record of the SPI experiments on the Raspberry Pi 5
-and NUCLEO-F446RE, through 2026-09-26. It includes unsuccessful experiments and
+and NUCLEO-F446RE, through 2026-09-28. It includes unsuccessful experiments and
 unresolved cases. The board has no motor or sensor hardware attached; output
 register checks are not physical actuator tests. See [README](../README.md) for
 current build/run instructions; historical commands below require their matching
 firmware and clients.
+
+## CPU-core isolation — 2026-09-28
+
+README documents the optional `isolcpus=3 irqaffinity=0-2` boot settings and
+running either host on CPU 3 with `taskset -c 3 chrt -f 50`. The active system
+reported isolated CPU `3` and default interrupt affinity mask `7` (CPUs 0–2).
+This excludes CPU 3 from normal scheduler load balancing, but some interrupts
+and kernel activity remain; an NVMe queue is still assigned to CPU 3.
+
+The checked kernel, `6.12.109+rpt-rpi-2712`, enables `CONFIG_PREEMPT` and
+`CONFIG_NO_HZ_IDLE`, but not `CONFIG_PREEMPT_RT` or `CONFIG_NO_HZ_FULL`.
+Full tickless support requires a different kernel build. The timing benefit
+of isolation has not been established by a controlled comparison.
+
+The subsequent fixed-schedule timing experiment was reverted at the user's
+request. Both clients retain pacing relative to each actual cycle start and
+the original CSV format and analyzer; only the core-isolation documentation
+is retained. No kernel or boot settings were changed during this revert.
 
 ## Full review against the original SPI port — 2026-09-26
 
