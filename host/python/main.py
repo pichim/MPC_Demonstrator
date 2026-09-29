@@ -92,13 +92,15 @@ def make_log():
     # Fixed storage for timing, READ telemetry and the subsequently sent command.
     log = {name: array("d", [0.0]) * capacity for name in ("dt", "spi", "time_s", "voltage_V", "current_A", "motor_position_rad", "motor_velocity_rad_s", "sent_setpoint", "sent_enable", "sent_mode")}
     log["count"] = 0
+    log["skipped_releases"] = 0
     return log
 
 
 def run(spi, log=None):
     if log is None:
         log = make_log()
-    period = PERIOD_US / 1_000_000
+    period_ns = PERIOD_US * 1000
+    next_release = time.monotonic_ns()
     previous = None
     run_start = time.perf_counter()
     enabled = False
@@ -130,13 +132,27 @@ def run(spi, log=None):
         log["count"] = i + 1
         previous = now
         enabled = True  # First exchange always sends zero setpoint, disabled.
-        remaining = start + period - time.perf_counter()
+        if log["count"] == len(log["spi"]):
+            break
+        next_release += period_ns
+        # Keep the original time grid; discard releases crossed during work.
+        finished = time.monotonic_ns()
+        if finished >= next_release:
+            missed = (finished - next_release) // period_ns + 1
+            log["skipped_releases"] += missed
+            next_release += missed * period_ns
+        remaining = next_release - time.monotonic_ns()
         if remaining > 0:
-            time.sleep(remaining)
+            time.sleep(remaining / 1_000_000_000)
+        # A wake delayed by whole periods executes only the latest release.
+        missed = max(0, (time.monotonic_ns() - next_release) // period_ns)
+        log["skipped_releases"] += missed
+        next_release += missed * period_ns
 
 
 def report(log, cpu_s, wall_s):
     # Formatting and output happen only after the final disable and SPI close.
+    print(f"skipped_releases={log['skipped_releases']}", file=sys.stderr)
     count = log["count"]
     writer = csv.writer(sys.stdout, lineterminator="\n")
     data_fields = ["time_s", "voltage_V", "current_A", "motor_position_rad", "motor_velocity_rad_s", "sent_setpoint", "sent_enable", "sent_mode"]

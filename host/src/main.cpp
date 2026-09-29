@@ -56,6 +56,7 @@ struct Log {
     std::vector<double> dt, spi, time_s, voltage_V, current_A, motor_position_rad, motor_velocity_rad_s, sent_setpoint,
         sent_enable, sent_mode;
     size_t count = 0;
+    uint64_t skipped_releases = 0;
     Log()
     {
         const double count = std::floor(Trun * 1e6 / PERIOD_US + 0.5);
@@ -87,6 +88,8 @@ static_assert((MODE == 0 || MODE == 1) && CURRENT_LIMIT_A > 0.0f &&
 void run(NssSPI &spi, Log &log)
 {
     const auto run_start = monotonic_ns();
+    constexpr long long period_ns = PERIOD_US * 1000LL;
+    auto next_release = run_start;
     long long previous = 0;
     bool enabled = false;
     while (!stopped && log.count < log.spi.size()) {
@@ -118,15 +121,28 @@ void run(NssSPI &spi, Log &log)
         ++log.count;
         previous = now;
         enabled = true; // First exchange always sends zero setpoint, disabled.
-        const auto deadline = start + PERIOD_US * 1000LL;
-        if (!stopped && monotonic_ns() < deadline)
-            sleep_until(deadline);
+        if (stopped || log.count == log.spi.size())
+            break;
+        next_release += period_ns;
+        // Keep the original time grid; discard releases crossed during work.
+        const auto finished = monotonic_ns();
+        if (finished >= next_release) {
+            const auto missed = (finished - next_release) / period_ns + 1;
+            log.skipped_releases += missed;
+            next_release += missed * period_ns;
+        }
+        sleep_until(next_release);
+        // A wake delayed by whole periods executes only the latest release.
+        const auto missed = std::max(0LL, (monotonic_ns() - next_release) / period_ns);
+        log.skipped_releases += missed;
+        next_release += missed * period_ns;
     }
 }
 
 void report(const Log &log, double cpu_s, double wall_s)
 {
     // Formatting and output happen only after the final disable and SPI close.
+    std::cerr << "skipped_releases=" << log.skipped_releases << '\n';
     std::cout << "cycle,dt_n,dt_min_ms,dt_mean_ms,dt_max_ms,spi_n,spi_min_ms,spi_mean_ms,spi_max_ms,cpu_s,wall_s,time_"
                  "s,voltage_V,current_A,motor_position_rad,motor_velocity_rad_s,sent_setpoint,sent_enable,sent_mode\n"
               << std::fixed << std::setprecision(4);

@@ -1676,3 +1676,213 @@ Both normal binaries still match the hardware-validated NSS checkpoint exactly;
 no hardware tests were repeated in this final review. No further runtime changes
 were found necessary. The Git index still contains the older checker path until
 the final move and documentation edits are staged; the working tree is authoritative.
+
+## Periodic Linux scheduling comparison — 2026-09-29
+The RealtimeThread example prompted an isolated test of periodic scheduling,
+without adding a thread framework or changing the production host/MCU code.
+The example header alone does not establish its wait/locking implementation.
+
+Three C++ variants used identical added measurement code and the same current
+18-byte NSS protocol, 30 MHz request, 30 µs setup/high margins, 0.08 A current
+setpoint after the first disabled cycle, and final-disable handling. All ran on
+isolated CPU 3 with SCHED_FIFO priority 50. Sources were copied from commit
+`9f244f3`; production settings remain 1 kHz / 20 nominal seconds.
+
+- Baseline: next release is the previous actual iteration start plus 250 µs.
+- Absolute sleep: scheduled release advances by 250 µs on CLOCK_MONOTONIC using
+  clock_nanosleep with TIMER_ABSTIME, independent of actual wake-up time.
+- Timerfd: a periodic CLOCK_MONOTONIC timer with blocking expiration-count reads.
+
+For the latter two, releases crossed during work are discarded before waiting
+for the next future release. A wait delayed by whole periods executes only the
+latest release and counts the missed ones. Small wake-up lateness does not skip
+an iteration. The first iteration is immediate, as in the original client.
+No signals, mutexes, additional control threads or per-cycle heap allocations
+were introduced by the scheduling helpers.
+
+Each variant ran three times for 40,000 cycles (10 nominal seconds), rotating
+order: baseline/absolute/timerfd, timerfd/baseline/absolute,
+absolute/timerfd/baseline. All 360,000 cycles completed with exit status zero,
+valid replies and no final-disable errors. No compilation ran during timing.
+Both fixed variants recorded zero skipped releases in ordinary traffic. All
+variants completed every measured READ-to-COMMAND work interval before its next
+scheduled release in these runs. Reply validation is not an applied-command ACK.
+
+Times below are µs. Percentiles pool samples across repetitions. Rate is measured
+between first and last starts, averaged over runs; CPU is mean percentage of one
+core. Startup is excluded from release-lateness and interval distributions.
+
+| Variant | Effective Hz | Mean SPI | p99 SPI | p99 completion interval | Max completion interval | p99 release lateness | CPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline | 3979.647 | 158.964 | 160.593 | 252.741 | 309.981 | 1.722 | 21.48% |
+| absolute | 4000.000 | 158.968 | 160.186 | 251.056 | 272.871 | 1.732 | 21.61% |
+| timerfd | 4000.002 | 159.028 | 160.814 | 251.315 | 281.018 | 2.001 | 21.63% |
+
+The baseline mean completion interval was 251.278 µs; both fixed variants were
+approximately 250.000 µs. Baseline release lateness is relative to its continually
+shifted target, not the original fixed time grid. Therefore similar lateness
+numbers do not imply equivalent long-term phase stability. Absolute sleep and
+timerfd maximum start intervals were 255.333 / 257.592 µs, versus 260.056 µs for
+baseline. Completion intervals also contain variation in communication duration.
+
+Mean READ-start through COMMAND-completion work, including the placeholder
+computation between calls, was 158.995 / 159.000 / 159.059 µs respectively.
+It excludes post-command logging/bookkeeping and sleep. Maximum work was
+223.500 / 183.000 / 205.686 µs. No SPI-call sum exceeded 250 µs.
+The recorded run wall time excludes the last inter-cycle sleep in all prototypes;
+rate comparison therefore uses start-to-start timing rather than count/wall time.
+
+A separate 1,000-cycle run per fixed variant injected a 1 ms sleep after cycle
+100, outside the measured communication work. Both counted four skipped releases,
+advanced the target by 1,250 µs, and completed the remaining cycles successfully.
+There were no duplicate scheduled releases or catch-up iterations for those four
+missed periods. This checks overrun bookkeeping separately from normal jitter.
+
+**Conclusion:** fixed absolute scheduling is the preferred candidate. It removed
+accumulated drift with nearly unchanged CPU use and communication time. Timerfd
+provided no demonstrated timing benefit here and requires more setup/cleanup.
+Neither variant establishes a hard deadline. The slightly better finite-run
+maxima do not prove a better worst-case bound. These runs did not include a real
+controller workload, intentional background stress or physical actuation checks.
+
+Production code was deliberately left unchanged for review of these results.
+The next proposed change is only the fixed release schedule with explicit skipped-
+release handling, not the full RealtimeThread abstraction. SPI should remain as is.
+
+Implementation, source-generation script, binaries, nine raw comparison CSVs,
+forced-stall CSVs, exit statuses and aggregate JSON are stored locally in
+`host/build/periodic-comparison-20260929/` (Git-ignored). `prepare.py` captures how
+variants were derived, `periodic.h` holds their scheduling logic, `run.py` records
+run order, and `analyze.py` recomputes the summary. The normal clients, their saved
+logs, firmware, kernel settings and README launch commands were not modified.
+
+API references: [clock_nanosleep](https://man7.org/linux/man-pages/man2/clock_nanosleep.2.html)
+and [timerfd](https://man7.org/linux/man-pages/man2/timerfd_create.2.html).
+
+## Fixed scheduling adopted in both clients — 2026-09-29
+
+The user requested direct, minimal repository changes after the prototype
+comparison. Both host loops now maintain a fixed monotonic release grid. C++
+retains CLOCK_MONOTONIC/TIMER_ABSTIME sleeps; Python uses monotonic_ns to compute
+the remaining time passed to time.sleep. No timerfd, extra thread, dependency,
+new scheduling class, SPI change or MCU change was introduced.
+
+Releases crossed during work are skipped before sleeping; a wake delayed by whole
+periods executes only the latest release. Each client counts skipped releases and
+prints the total to stderr after final-disable handling and SPI close. The CSV
+schema is unchanged. Small lateness does not shift subsequent scheduled releases.
+There is no final inter-cycle sleep. Trun still specifies a number of executed
+cycles, so missed releases extend elapsed time. Skipped releases do not count
+all forms of jitter: completion intervals can exceed a period without a skipped
+release when communication duration varies between cycles.
+
+Production defaults remain 1 kHz, 20 nominal seconds, 30 MHz, current mode and
+0.08 A. SPI setup/high margins and command validation/limits are unchanged.
+Both normal clients ran directly from the repo for 20,000 cycles each. Then
+isolated copies with only period/runtime changed ran three 40,000-cycle trials
+per language at 4 kHz (10 nominal seconds), alternating language order. All used
+CPU 3 and FIFO priority 50. Nothing compiled during the hardware timing runs.
+All 280,000 normal cycles completed without communication or final-disable errors.
+
+Percentiles pool per-cycle CSV samples across repetitions. CPU is average process
+CPU percentage of one core; rate is estimated from rounded completion-interval
+samples, so tiny deviations above exactly 4,000 Hz are not significant.
+All times below are µs.
+
+| Client | Target Hz | Cycles | Effective Hz | Mean SPI | p99 SPI | Max SPI | p99 dt | Max dt | CPU | Skipped releases |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| python | 4000 | 120000 | 3999.9 | 166.3 | 168.8 | 330.5 | 252.0 | 418.4 | 26.11% | 5 |
+| cpp | 4000 | 120000 | 4000.0 | 159.0 | 160.8 | 242.6 | 251.3 | 332.0 | 21.60% | 0 |
+| python-default | 1000 | 20000 | 1000.0 | 166.6 | 170.7 | 267.6 | 1005.2 | 1082.7 | 6.58% | 0 |
+| cpp-default | 1000 | 20000 | 1000.0 | 159.1 | 161.3 | 191.8 | 1002.2 | 1037.0 | 5.41% | 0 |
+
+At 4 kHz Python had five SPI-call sums exceeding 250 µs; C++ had none. The reported
+skip totals were Python 1/1/3 and C++ 0/0/0 across repetitions. The ordinary target
+rate is now maintained without accumulated start-relative drift, but rare timing
+excursions remain. Python's worst observed communication took 330.5 µs; C++'s took
+242.6 µs. C++ remains the stronger candidate for 4 kHz control. Neither result
+establishes a worst-case bound or includes real MPC computation.
+
+A separate 1,000-cycle test per language injected a 1 ms pause after cycle 100.
+Both completed, counted exactly four skipped releases, and produced the next
+completion interval around 1.25 ms (C++ 1.2500, Python 1.2497), rather than queuing
+four catch-up iterations. Python tests exercise the actual loop with a controlled
+clock: a work overrun, a delayed wake-up, and small lateness that must not shift the
+schedule. All three pass, as do three existing SPI transport tests and the MCU
+motor-command validation/expiry/wrap test.
+
+MCU and C++ builds and Python byte-compilation passed. The rebuilt MCU binary is
+identical to its pre-change version, so no flash was necessary. Default firmware
+and SPI transport behavior were retained; only host release scheduling changed.
+README pacing/reporting instructions were updated. All clients closed normally.
+
+Raw logs, stderr skip counts, pre-change sources, 4 kHz source copies/binary,
+injected-stall sources/binary, and aggregate statistics are saved locally in
+`host/build/fixed-production-20260929/`. `analyze.py` reconstructs the aggregate
+report; `run.py` records the normal run sequence. The earlier prototype results
+above remain historical evidence; their statement that production was unchanged
+was superseded by this adoption.
+
+## Repeated 2 kHz and 1 kHz tests — 2026-09-29
+
+Following concerns about 4 kHz completion-interval maxima, both updated clients
+were retested at 2 kHz and 1 kHz. Each client/rate ran three times for 10 nominal
+seconds: 60,000 cycles per client at 2 kHz and 30,000 per client at 1 kHz.
+Rate and client order alternated between repeats. All 180,000 cycles completed
+with valid replies, exit code zero and no final-disable errors. Tests used CPU 3,
+FIFO priority 50, requested 30 MHz, the existing 0.08 A current-mode setpoint,
+18-byte frames and unchanged NSS margins. Test copies changed only period/runtime;
+repository defaults, normal binaries and earlier logs were not overwritten.
+No compilation ran concurrently with timing. These are ordinary bench runs,
+without injected stalls or a real MPC workload.
+
+Times are µs; percentiles pool individual samples across three runs. CPU is the
+mean percentage of one core. Skips are missed scheduled releases, not a count of
+all completion intervals longer than their target.
+
+| Rate | Client | Mean SPI | p99 SPI | Max SPI | Mean dt | p99 dt | Max dt | CPU | Skipped releases |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2000 Hz | python | 166.9 | 174.8 | 454.3 | 500.0 | 505.5 | 973.6 | 13.23% | 1 |
+| 2000 Hz | cpp | 159.0 | 161.3 | 227.6 | 500.0 | 502.2 | 554.5 | 10.80% | 0 |
+| 1000 Hz | python | 166.7 | 172.8 | 288.5 | 1000.0 | 1006.8 | 1143.9 | 6.59% | 0 |
+| 1000 Hz | cpp | 159.1 | 161.1 | 178.8 | 1000.0 | 1002.2 | 1016.8 | 5.42% | 0 |
+
+C++ had zero skipped releases at both rates. Its maximum completion interval
+exceeded the target by 54.5 µs (10.9%) at 2 kHz and 16.8 µs (1.68%) at 1 kHz.
+Python skipped one release in its second 2 kHz run, with a worst completion gap
+of 973.6 µs. Its 1 kHz runs skipped no releases but reached 1,143.9 µs between
+completions. No measured SPI-call sum exceeded its respective period, including
+that Python run: wake-up delays and work outside the measured SPI calls also
+consume schedule time. This data does not isolate the cause of the Python skip.
+
+Completion intervals above 110% of target: Python/C++ 39/1 at 2 kHz and 1/0 at
+1 kHz. Lower frequency provides more compute headroom; it does not eliminate
+outliers or establish a bound. The worse Python maximum than in the earlier
+4 kHz test should not be read as proof that reducing rate causes more jitter;
+these are separate finite samples. C++ at 1 kHz had the tightest relative observed
+completion timing of these runs. Required controller tolerance remains undefined.
+
+Validated CSVs, per-run skipped counts and exit status, test source/binary copies,
+run order and analysis scripts, and aggregate JSON are saved locally under
+`host/build/rate-comparison-20260929/`. `RESULTS.md` duplicates this report.
+
+## Commit review and retained operating rate — 2026-09-29
+
+Decision: retain 1 kHz (`PERIOD_US = 1000`) in both production clients, with
+20 nominal seconds / 20,000 cycles. Higher-rate tests remain experiments. The
+README now states this explicitly and describes fixed scheduling, skipped-release
+reporting, final-cycle behavior and the absence of hard timing guarantees.
+
+Final review found no blocking defect in the changed scheduling paths. The source
+matches the hardware-tested versions, with only rate/runtime differing in the
+isolated higher-rate copies. Changes remain limited to the two host loop files,
+three focused Python scheduling regression tests, and documentation. MCU sources,
+SPI transport, command format/limits, priorities, NSS margins and build files are
+unchanged. Comments describe the scheduling and overrun policy implemented.
+
+Both builds, six host tests, the MCU command-policy test, Python byte-compilation
+and whitespace checks passed again. The MCU binary remains identical to the
+pre-change firmware. No further hardware runs were needed for documentation-only
+edits. The accepted 1 kHz timing evidence is above; it is not a worst-case bound
+or a guarantee of bug-free operation. No commit or staging operation was performed.
+Include `host/tests/test_periodic.py` when staging the five changed/new files.

@@ -255,8 +255,19 @@ time (100% means one core), excluding buffer allocation, SPI setup, final disabl
 and reporting. Timestamping and storing samples still add overhead.
 
 Both use the same single-threaded READ → compute → COMMAND → record → sleep flow.
-`chrt` sets FIFO priority 50. Pacing is relative to each cycle's start, without
-catch-up bursts; this is not a hard real-time guarantee. `Trun` determines the cycle count, not a wall-clock deadline.
+`chrt` sets FIFO priority 50. Both clients advance a fixed monotonic release
+schedule each period, so ordinary wake-up lateness does not accumulate as drift.
+Releases crossed during work are skipped; a wake delayed by whole periods executes
+only the latest release, without catch-up bursts. C++ uses an absolute sleep;
+Python sleeps for the remaining time to its scheduled release. After closing SPI,
+both report `skipped_releases` on stderr, leaving the CSV format unchanged.
+This is not a hard real-time guarantee. `Trun` determines the cycle count, not a
+wall-clock deadline; skipped releases extend the run. The last cycle does not sleep.
+
+Keep **1 kHz** (`PERIOD_US = 1000`) as the operating default in both clients.
+The 2/4 kHz trials were experiments, not a change to that default. Repeated 1 kHz
+tests recorded no skipped releases, but completion intervals still varied; see
+[development results](docs/DEVELOPMENT.md#repeated-2-khz-and-1-khz-tests--2026-09-29).
 
 Both reject non-finite controller results before applying command limits. They
 attempt a final disabled command after completion, Ctrl+C or execution errors, and
