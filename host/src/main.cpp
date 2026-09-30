@@ -98,7 +98,43 @@ void run(NssSPI &spi, Log &log)
         const auto read_end = monotonic_ns();
         if (stopped)
             break;
+
+
         // Future controller computation belongs here, after receiving sensors.
+        /*
+        //TO DO
+        // probably this import part will no be in this run fct
+        // just have the code pasted here for now. need to add matDir variable
+        try {
+        Eigen::MatrixXd H      = loadMatrixCSV(matDir + "/H.csv");
+        Eigen::MatrixXd Aineq  = loadMatrixCSV(matDir + "/Aineq.csv");
+        Eigen::MatrixXd Fx     = loadMatrixCSV(matDir + "/Fx.csv");
+        Eigen::VectorXd Fu0    = loadVectorCSV(matDir + "/Fu0.csv");
+        Eigen::VectorXd Fd     = loadVectorCSV(matDir + "/Fd.csv");
+        Eigen::MatrixXd Fr     = loadMatrixCSV(matDir + "/Fr.csv");
+        Eigen::MatrixXd Ex     = loadMatrixCSV(matDir + "/Ex.csv");
+        Eigen::VectorXd Eu0    = loadVectorCSV(matDir + "/Eu0.csv");
+        Eigen::VectorXd Ed     = loadVectorCSV(matDir + "/Ed.csv");
+        Eigen::VectorXd bconst = loadVectorCSV(matDir + "/bconst.csv");
+        Eigen::MatrixXd Aaug   = loadMatrixCSV(matDir + "/Aaug.csv");
+        Eigen::VectorXd Baug   = loadVectorCSV(matDir + "/Baug.csv");
+        Eigen::MatrixXd Caug   = loadMatrixCSV(matDir + "/Caug.csv");
+        Eigen::MatrixXd Lgain  = loadMatrixCSV(matDir + "/Lgain.csv");
+
+        CsvTable meta = loadCsvTable(matDir + "/meta.csv");
+        double umx = meta.rows[0][colIndex(meta, "umx")];
+
+        MpcController ctrl(H, Aineq, Fx, Fu0, Fd, Fr, Ex, Eu0, Ed, bconst, umx,
+                            Aaug, Baug, Caug, Lgain);
+        
+        //see how we can inclde the measurements here
+        Eigen::Vector2d xmeas(0.1, 0.1);
+        double theta_ref = 6.0;
+
+        MpcController::Result r = ctrl.step(xmeas, theta_ref);
+        //use the r structure for further calculations. use u 
+        */
+        
         const int mode = MODE;
         float setpoint = enabled ? SETPOINT : 0.0f;
         if (!std::isfinite(setpoint))
