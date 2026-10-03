@@ -38,7 +38,7 @@ public:
     using MatLg  = Eigen::Matrix<double, NXA, 2>;
 
    
-    static constexpr int    MAX_IT      = 30;     
+    static constexpr int    MAX_IT      = 50;     
     static constexpr double TOL_FEAS    = 1e-4;   
     static constexpr double TOL_MU      = 1e-4;   
     static constexpr double TAU         = 0.995;

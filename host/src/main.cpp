@@ -3,11 +3,14 @@
 #define SPI_SPEED_HZ 30000000
 #define PERIOD_US 1000
 #define SETPOINT 0.08f        // A in current mode, V in voltage mode.
-#define MODE 0                // 0: current setpoint, 1: direct voltage.
+#define MODE 1                // 0: current setpoint, 1: direct voltage.
 #define CURRENT_LIMIT_A 1.0f  // Host current-command limit; keep aligned with Python host.
 #define VOLTAGE_LIMIT_V 24.0f // MCU supply minus compensation; keep aligned with config.h.
-#define Trun 20.0             // Nominal seconds; converted to a rounded integer cycle count.
+#define Trun 5.0              // Nominal seconds; converted to a rounded integer cycle count.
 #define PRINT_EVERY 1         // Samples per report after stopping; 0 reports all at once.
+
+//#define T_REF_STEP_S 5.0
+//#define THETA_REF_RAD (2.0 * 3.14159265358979323846)
 
 #include <algorithm>
 #include <cmath>
@@ -21,7 +24,11 @@
 #include <vector>
 
 #include "spi_nss.h"
-//#include "csv_utils.hpp"
+#include "mpc_solver.hpp"
+#include "ref.hpp"
+#include "csv_utils.hpp"
+#include <Eigen/Dense>
+
 namespace {
 volatile std::sig_atomic_t stopped = 0;
 void stop(int) { stopped = 1; }
@@ -54,7 +61,7 @@ void sleep_until(long long deadline)
 struct Log {
     // Fixed storage for timing, READ telemetry and the subsequently sent command.
     std::vector<double> dt, spi, time_s, voltage_V, current_A, motor_position_rad, motor_velocity_rad_s, sent_setpoint,
-        sent_enable, sent_mode;
+    sent_enable, sent_mode, u_mpc, xhat_current, xhat_speed, xhat_pose, xhat_dist, mpc_status, mpc_iters, mpc_fault, mpc_us;
     size_t count = 0;
     uint64_t skipped_releases = 0;
     Log()
@@ -64,15 +71,24 @@ struct Log {
             throw std::invalid_argument("Invalid run sample count");
         dt.resize(static_cast<size_t>(count));
         for (auto *values : {&spi,
-                             &time_s,
-                             &voltage_V,
-                             &current_A,
-                             &motor_position_rad,
-                             &motor_velocity_rad_s,
-                             &sent_setpoint,
-                             &sent_enable,
-                             &sent_mode})
-            values->resize(dt.size());
+                     &time_s,
+                     &voltage_V,
+                     &current_A,
+                     &motor_position_rad,
+                     &motor_velocity_rad_s,
+                     &sent_setpoint,
+                     &sent_enable,
+                     &sent_mode,
+                     &u_mpc,
+                     &xhat_current,
+                     &xhat_speed,
+                     &xhat_pose,
+                     &xhat_dist,
+                     &mpc_status,
+                     &mpc_iters,
+                     &mpc_fault,
+                     &mpc_us})
+              values->resize(dt.size());
     }
 };
 static_assert(PERIOD_US > 0 && PRINT_EVERY >= 0 && std::is_integral_v<decltype(PERIOD_US)> &&
@@ -94,30 +110,29 @@ void run(NssSPI &spi, Log &log)
     bool enabled = false;
 
     //import the matrices
-    /*
-    std::string matDir = "./mpc_matrices";
-    try {
-    Eigen::MatrixXd H      = loadMatrixCSV(matDir + "/H.csv");
-    Eigen::MatrixXd Aineq  = loadMatrixCSV(matDir + "/Aineq.csv");
-    Eigen::MatrixXd Fx     = loadMatrixCSV(matDir + "/Fx.csv");
-    Eigen::VectorXd Fu0    = loadVectorCSV(matDir + "/Fu0.csv");
-    Eigen::VectorXd Fd     = loadVectorCSV(matDir + "/Fd.csv");
-    Eigen::MatrixXd Fr     = loadMatrixCSV(matDir + "/Fr.csv");
-    Eigen::MatrixXd Ex     = loadMatrixCSV(matDir + "/Ex.csv");
-    Eigen::VectorXd Eu0    = loadVectorCSV(matDir + "/Eu0.csv");
-    Eigen::VectorXd Ed     = loadVectorCSV(matDir + "/Ed.csv");
-    Eigen::VectorXd bconst = loadVectorCSV(matDir + "/bconst.csv");
-    Eigen::MatrixXd Aaug   = loadMatrixCSV(matDir + "/Aaug.csv");
-    Eigen::VectorXd Baug   = loadVectorCSV(matDir + "/Baug.csv");
-    Eigen::MatrixXd Caug   = loadMatrixCSV(matDir + "/Caug.csv");
-    Eigen::MatrixXd Lgain  = loadMatrixCSV(matDir + "/Lgain.csv");
 
+    std::string matDir = "/home/pi/MPC_Demonstrator/host/mpc_matrices";
+
+    Eigen::MatrixXd H      = loadMatrixCSV(matDir + "/H.csv").cast<double>();
+    Eigen::MatrixXd Aineq  = loadMatrixCSV(matDir + "/Aineq.csv").cast<double>();
+    Eigen::MatrixXd Fx     = loadMatrixCSV(matDir + "/Fx.csv").cast<double>();
+    Eigen::VectorXd Fu0    = loadVectorCSV(matDir + "/Fu0.csv").cast<double>();
+    Eigen::VectorXd Fd     = loadVectorCSV(matDir + "/Fd.csv").cast<double>();
+    Eigen::MatrixXd Fr     = loadMatrixCSV(matDir + "/Fr.csv").cast<double>();
+    Eigen::MatrixXd Ex     = loadMatrixCSV(matDir + "/Ex.csv").cast<double>();
+    Eigen::VectorXd Eu0    = loadVectorCSV(matDir + "/Eu0.csv").cast<double>();
+    Eigen::VectorXd Ed     = loadVectorCSV(matDir + "/Ed.csv").cast<double>();
+    Eigen::VectorXd bconst = loadVectorCSV(matDir + "/bconst.csv").cast<double>();
+    Eigen::MatrixXd Aaug   = loadMatrixCSV(matDir + "/Aaug.csv").cast<double>();
+    Eigen::VectorXd Baug   = loadVectorCSV(matDir + "/Baug.csv").cast<double>();
+    Eigen::MatrixXd Caug   = loadMatrixCSV(matDir + "/Caug.csv").cast<double>();
+    Eigen::MatrixXd Lgain  = loadMatrixCSV(matDir + "/Lgain.csv").cast<double>();
     CsvTable meta = loadCsvTable(matDir + "/meta.csv");
     double umx = meta.rows[0][colIndex(meta, "umx")];
-    
-    MpcController ctrl(H, Aineq, Fx, Fu0, Fd, Fr, Ex, Eu0, Ed, bconst, umx,
-                            Aaug, Baug, Caug, Lgain);
-    */
+
+    MpcController ctrl(H, Aineq, Fx, Fu0, Fd, Fr, Ex, Eu0, Ed, bconst, umx, Aaug, Baug, Caug, Lgain);
+    double theta0 = 0.0;
+    bool have_theta0 = false;
 
     while (!stopped && log.count < log.spi.size()) {
         const auto start = monotonic_ns();
@@ -128,22 +143,26 @@ void run(NssSPI &spi, Log &log)
 
 
         // Future controller computation belongs here, after receiving sensors.
-        /*
-        
+
         //see how we can include the measurements here
-        Eigen::Vector2d xmeas(measurements[1], measurements[2]);
+        if (!have_theta0) { theta0 = measurements[2]; have_theta0 = true; }
+        const double position = measurements[2] - theta0;
+        Eigen::Vector2d xmeas(measurements[1], position);
 
-        //where does ref come from?
-        double theta_ref = 2*3.141592;
+        const double t = (read_end - run_start) / 1e9;
+        double theta_ref = ref::reference(t);
+        //double theta_ref = 2*3.141592;
 
+        const auto mpc_t0 = monotonic_ns();
         MpcController::Result r = ctrl.step(xmeas, theta_ref);
+        const double mpc_us = (monotonic_ns() - mpc_t0) / 1e3;
 
         //see if its the way, replace line 146
-        float setpoint = enabled ? static_cast<float>(r.u_apply) : 0.0f;
-        */
-        
+        //float setpoint = enabled ? static_cast<float>(r.u_apply) : 0.0f;
+
         const int mode = MODE;
-        float setpoint = enabled ? SETPOINT : 0.0f;
+        //float setpoint = enabled ? SETPOINT : 0.0f;
+        float setpoint = enabled ? static_cast<float>(r.u_apply) : 0.0f;
         if (!std::isfinite(setpoint))
             throw std::runtime_error("Non-finite controller setpoint; stopping.");
         const float limit = mode == 0 ? CURRENT_LIMIT_A : VOLTAGE_LIMIT_V;
@@ -161,6 +180,16 @@ void run(NssSPI &spi, Log &log)
         log.sent_setpoint[log.count] = setpoint;
         log.sent_enable[log.count] = enabled;
         log.sent_mode[log.count] = mode;
+        //log mpc output values
+        log.u_mpc[log.count] = r.u_apply;
+        log.xhat_current[log.count] = r.xhat(0);
+        log.xhat_speed[log.count] = r.xhat(1);
+        log.xhat_pose[log.count] = r.xhat(2);
+        log.xhat_dist[log.count] = r.xhat(3);
+        log.mpc_status[log.count] = r.status;
+        log.mpc_iters[log.count] = r.iters;
+        log.mpc_fault[log.count] = r.fault;
+        log.mpc_us[log.count] = mpc_us;
         ++log.count;
         previous = now;
         enabled = true; // First exchange always sends zero setpoint, disabled.
@@ -187,7 +216,8 @@ void report(const Log &log, double cpu_s, double wall_s)
     // Formatting and output happen only after the final disable and SPI close.
     std::cerr << "skipped_releases=" << log.skipped_releases << '\n';
     std::cout << "cycle,dt_n,dt_min_ms,dt_mean_ms,dt_max_ms,spi_n,spi_min_ms,spi_mean_ms,spi_max_ms,cpu_s,wall_s,time_"
-                 "s,voltage_V,current_A,motor_position_rad,motor_velocity_rad_s,sent_setpoint,sent_enable,sent_mode\n"
+                 "s,voltage_V,current_A,motor_position_rad,motor_velocity_rad_s,sent_setpoint,sent_enable,sent_mode,"
+                 "u_mpc,xhat_current_A,xhat_speed_rad_s,xhat_pose_rad,xhat_dist,mpc_status,mpc_iters,mpc_fault,mpc_us\n"
               << std::fixed << std::setprecision(4);
     const size_t window = PRINT_EVERY ? PRINT_EVERY : std::max(log.count, size_t{1});
     for (size_t first = 0; first < log.count; first += window) {
@@ -210,7 +240,10 @@ void report(const Log &log, double cpu_s, double wall_s)
         std::cout << ',' << cpu_s << ',' << wall_s << std::setprecision(6) << ',' << log.time_s[i] << ','
                   << log.voltage_V[i] << ',' << log.current_A[i] << ',' << log.motor_position_rad[i] << ','
                   << log.motor_velocity_rad_s[i] << ',' << log.sent_setpoint[i] << ','
-                  << static_cast<int>(log.sent_enable[i]) << ',' << static_cast<int>(log.sent_mode[i]) << '\n';
+                  << static_cast<int>(log.sent_enable[i]) << ',' << static_cast<int>(log.sent_mode[i]) << ',' << log.u_mpc[i] << ',' << log.xhat_current[i] << ','
+                  << log.xhat_speed[i] << ',' << log.xhat_pose[i] << ',' << log.xhat_dist[i] << ','
+                  << static_cast<int>(log.mpc_status[i]) << ',' << static_cast<int>(log.mpc_iters[i]) << ','
+                  << static_cast<int>(log.mpc_fault[i]) << ',' << log.mpc_us[i] << '\n';
     }
 }
 } // namespace

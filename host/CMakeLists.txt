@@ -7,5 +7,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(mpc_spi src/main.cpp)
+target_include_directories(mpc_spi PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/MPCcontroller
+    ${CMAKE_CURRENT_SOURCE_DIR}/../mcu/lib/eigen-lib)
 target_include_directories(mpc_spi PRIVATE lib/Spi)
-target_compile_options(mpc_spi PRIVATE -Wall -Wextra -Wpedantic -Werror)
+#target_compile_options(mpc_spi PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_options(mpc_spi PRIVATE -O3 -march=native)
+target_compile_definitions(mpc_spi PRIVATE NDEBUG EIGEN_NO_DEBUG)
