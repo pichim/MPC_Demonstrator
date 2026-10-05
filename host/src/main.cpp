@@ -9,9 +9,6 @@
 #define Trun 5.0              // Nominal seconds; converted to a rounded integer cycle count.
 #define PRINT_EVERY 1         // Samples per report after stopping; 0 reports all at once.
 
-//#define T_REF_STEP_S 5.0
-//#define THETA_REF_RAD (2.0 * 3.14159265358979323846)
-
 #include <algorithm>
 #include <cmath>
 #include <csignal>
@@ -110,7 +107,6 @@ void run(NssSPI &spi, Log &log)
     bool enabled = false;
 
     //import the matrices
-
     std::string matDir = "/home/pi/MPC_Demonstrator/host/mpc_matrices";
 
     Eigen::MatrixXd H      = loadMatrixCSV(matDir + "/H.csv").cast<double>();
@@ -141,10 +137,7 @@ void run(NssSPI &spi, Log &log)
         if (stopped)
             break;
 
-
-        // Future controller computation belongs here, after receiving sensors.
-
-        //see how we can include the measurements here
+        //MPC control
         if (!have_theta0) { theta0 = measurements[2]; have_theta0 = true; }
         const double position = measurements[2] - theta0;
         Eigen::Vector2d xmeas(measurements[1], position);
@@ -156,9 +149,6 @@ void run(NssSPI &spi, Log &log)
         const auto mpc_t0 = monotonic_ns();
         MpcController::Result r = ctrl.step(xmeas, theta_ref);
         const double mpc_us = (monotonic_ns() - mpc_t0) / 1e3;
-
-        //see if its the way, replace line 146
-        //float setpoint = enabled ? static_cast<float>(r.u_apply) : 0.0f;
 
         const int mode = MODE;
         //float setpoint = enabled ? SETPOINT : 0.0f;
