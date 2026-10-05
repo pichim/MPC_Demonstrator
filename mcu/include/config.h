@@ -57,4 +57,8 @@
 #define MPC_CURRENT_SETPOINT_F_CUT_HZ 500.0f // Second order low-pass filter cutoff frequency in Hz
 #define MPC_CURRENT_SETPOINT_DAMPING 0.9f    // Second order low-pass filter damping ratio
 
+//current anti aliasing filter
+#define MPC_CURRENT_AAF_F_CUT_HZ 300.0f
+#define MPC_CURRENT_AAF_DAMPING  0.7071f
+
 #endif /* MPC_CONFIG_H_ */

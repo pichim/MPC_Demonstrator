@@ -34,6 +34,7 @@ private:
     IIRFilter positionNotch;
     IIRFilter velocityNotch;
     IIRFilter lowPass2CurrentSetpoint;
+    IIRFilter currentAntiAliasFilter;
     PIDCntrl pidCntrl;
 
 #if MPC_PERFORM_GPA_MEAS

@@ -219,6 +219,7 @@ void report(const Log &log, double cpu_s, double wall_s)
                  "s,voltage_V,current_A,motor_position_rad,motor_velocity_rad_s,sent_setpoint,sent_enable,sent_mode,"
                  "u_mpc,xhat_current_A,xhat_speed_rad_s,xhat_pose_rad,xhat_dist,mpc_status,mpc_iters,mpc_fault,mpc_us\n"
               << std::fixed << std::setprecision(4);
+    
     const size_t window = PRINT_EVERY ? PRINT_EVERY : std::max(log.count, size_t{1});
     for (size_t first = 0; first < log.count; first += window) {
         const auto last = std::min(first + window, log.count);
@@ -237,6 +238,7 @@ void report(const Log &log, double cpu_s, double wall_s)
         stats(log.spi, first);
         // Run totals repeated as metadata, not per-window CPU measurements.
         const auto i = last - 1; // Last-cycle data when timing windows are grouped.
+        
         std::cout << ',' << cpu_s << ',' << wall_s << std::setprecision(6) << ',' << log.time_s[i] << ','
                   << log.voltage_V[i] << ',' << log.current_A[i] << ',' << log.motor_position_rad[i] << ','
                   << log.motor_velocity_rad_s[i] << ',' << log.sent_setpoint[i] << ','
@@ -244,7 +246,9 @@ void report(const Log &log, double cpu_s, double wall_s)
                   << log.xhat_speed[i] << ',' << log.xhat_pose[i] << ',' << log.xhat_dist[i] << ','
                   << static_cast<int>(log.mpc_status[i]) << ',' << static_cast<int>(log.mpc_iters[i]) << ','
                   << static_cast<int>(log.mpc_fault[i]) << ',' << log.mpc_us[i] << '\n';
+                  
     }
+                  
 }
 } // namespace
 
