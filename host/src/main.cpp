@@ -4,9 +4,9 @@
 #define PERIOD_US 1000
 #define SETPOINT 0.08f        // A in current mode, V in voltage mode.
 #define MODE 1                // 0: current setpoint, 1: direct voltage.
-#define CURRENT_LIMIT_A 1.0f  // Host current-command limit; keep aligned with Python host.
+#define CURRENT_LIMIT_A 1.7f  // Host current-command limit; keep aligned with Python host.
 #define VOLTAGE_LIMIT_V 24.0f // MCU supply minus compensation; keep aligned with config.h.
-#define Trun 5.0              // Nominal seconds; converted to a rounded integer cycle count.
+#define Trun 10.0              // Nominal seconds; converted to a rounded integer cycle count.
 #define PRINT_EVERY 1         // Samples per report after stopping; 0 reports all at once.
 
 #include <algorithm>
@@ -22,9 +22,16 @@
 
 #include "spi_nss.h"
 #include "mpc_solver.hpp"
+#include "mpc_solver_iRef.hpp"
 #include "ref.hpp"
 #include "csv_utils.hpp"
 #include <Eigen/Dense>
+
+#if MODE == 1
+using Controller = MpcController;
+#else
+using Controller = MpcControllerCurr;
+#endif
 
 namespace {
 volatile std::sig_atomic_t stopped = 0;
@@ -107,8 +114,12 @@ void run(NssSPI &spi, Log &log)
     bool enabled = false;
 
     //import the matrices
+#if MODE == 1
     std::string matDir = "/home/pi/MPC_Demonstrator/host/mpc_matrices";
-
+#else
+    std::string matDir = "/home/pi/MPC_Demonstrator/host/mpc_matrices_curr";
+#endif
+    
     Eigen::MatrixXd H      = loadMatrixCSV(matDir + "/H.csv").cast<double>();
     Eigen::MatrixXd Aineq  = loadMatrixCSV(matDir + "/Aineq.csv").cast<double>();
     Eigen::MatrixXd Fx     = loadMatrixCSV(matDir + "/Fx.csv").cast<double>();
@@ -126,7 +137,8 @@ void run(NssSPI &spi, Log &log)
     CsvTable meta = loadCsvTable(matDir + "/meta.csv");
     double umx = meta.rows[0][colIndex(meta, "umx")];
 
-    MpcController ctrl(H, Aineq, Fx, Fu0, Fd, Fr, Ex, Eu0, Ed, bconst, umx, Aaug, Baug, Caug, Lgain);
+    Controller ctrl(H, Aineq, Fx, Fu0, Fd, Fr, Ex, Eu0, Ed, bconst, umx, Aaug, Baug, Caug, Lgain);
+  
     double theta0 = 0.0;
     bool have_theta0 = false;
 
@@ -147,7 +159,11 @@ void run(NssSPI &spi, Log &log)
         //double theta_ref = 2*3.141592;
 
         const auto mpc_t0 = monotonic_ns();
-        MpcController::Result r = ctrl.step(xmeas, theta_ref);
+#if MODE == 1
+        Controller::Result r = ctrl.step(xmeas, theta_ref);
+#else
+        Controller::Result r = ctrl.step(position, theta_ref);
+#endif
         const double mpc_us = (monotonic_ns() - mpc_t0) / 1e3;
 
         const int mode = MODE;
@@ -172,10 +188,19 @@ void run(NssSPI &spi, Log &log)
         log.sent_mode[log.count] = mode;
         //log mpc output values
         log.u_mpc[log.count] = r.u_apply;
+
+#if MODE == 1
         log.xhat_current[log.count] = r.xhat(0);
-        log.xhat_speed[log.count] = r.xhat(1);
-        log.xhat_pose[log.count] = r.xhat(2);
-        log.xhat_dist[log.count] = r.xhat(3);
+        log.xhat_speed[log.count]   = r.xhat(1);
+        log.xhat_pose[log.count]    = r.xhat(2);
+        log.xhat_dist[log.count]    = r.xhat(3);
+#else
+        log.xhat_current[log.count] = 0.0;
+        log.xhat_speed[log.count]   = r.xhat(0);
+        log.xhat_pose[log.count]    = r.xhat(1);
+        log.xhat_dist[log.count]    = r.xhat(2);
+#endif
+
         log.mpc_status[log.count] = r.status;
         log.mpc_iters[log.count] = r.iters;
         log.mpc_fault[log.count] = r.fault;
