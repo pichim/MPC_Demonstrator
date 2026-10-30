@@ -37,5 +37,5 @@ private:
     DigitalOut enable;     // Enable power h-bridge
     AnalogIn current;      // Current sensing
     DigitalIn fault;       // Fault status flag
-    DigitalOut frtt_do;    // Fast real-time thread debug output
+    DigitalOut frtt_do;    // Motor-task execution pulse
 };

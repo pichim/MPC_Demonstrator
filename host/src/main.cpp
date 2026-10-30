@@ -26,11 +26,6 @@ namespace {
 volatile std::sig_atomic_t stopped = 0;
 void stop(int) { stopped = 1; }
 
-protocol::Measurements read_measurements(NssSPI &spi)
-{
-    return protocol::decode(spi.transfer(protocol::frame(protocol::Read)));
-}
-
 protocol::Measurements send_command(NssSPI &spi, float setpoint, bool enable, int mode = MODE)
 {
     // Reply is prepared before receipt of this command; not an application ACK.
@@ -52,7 +47,7 @@ void sleep_until(long long deadline)
 }
 
 struct Log {
-    // Fixed storage for timing, READ telemetry and the subsequently sent command.
+    // Fixed storage for timing, telemetry and the command sent in the same exchange.
     std::vector<double> dt, spi, time_s, voltage_V, current_A, motor_position_rad, motor_velocity_rad_s, sent_setpoint,
         sent_enable, sent_mode;
     size_t count = 0;
@@ -92,25 +87,15 @@ void run(NssSPI &spi, Log &log)
     auto next_release = run_start;
     long long previous = 0;
     bool enabled = false;
+    float setpoint = 0.0f;
+    int mode = MODE;
     while (!stopped && log.count < log.spi.size()) {
         const auto start = monotonic_ns();
-        const auto measurements = read_measurements(spi);
-        const auto read_end = monotonic_ns();
-        if (stopped)
-            break;
-        // Future controller computation belongs here, after receiving sensors.
-        const int mode = MODE;
-        float setpoint = enabled ? SETPOINT : 0.0f;
-        if (!std::isfinite(setpoint))
-            throw std::runtime_error("Non-finite controller setpoint; stopping.");
-        const float limit = mode == 0 ? CURRENT_LIMIT_A : VOLTAGE_LIMIT_V;
-        setpoint = std::clamp(setpoint, -limit, limit);
-        const auto command_start = monotonic_ns();
-        send_command(spi, setpoint, enabled, mode);
+        const auto measurements = send_command(spi, setpoint, enabled, mode);
         const auto now = monotonic_ns();
         log.dt[log.count] = previous ? (now - previous) / 1e6 : 0.0;
-        log.spi[log.count] = (read_end - start + now - command_start) / 1e6;
-        log.time_s[log.count] = (read_end - run_start) / 1e9;
+        log.spi[log.count] = (now - start) / 1e6;
+        log.time_s[log.count] = (now - run_start) / 1e9;
         log.voltage_V[log.count] = measurements[0];
         log.current_A[log.count] = measurements[1];
         log.motor_position_rad[log.count] = measurements[2];
@@ -120,9 +105,17 @@ void run(NssSPI &spi, Log &log)
         log.sent_mode[log.count] = mode;
         ++log.count;
         previous = now;
-        enabled = true; // First exchange always sends zero setpoint, disabled.
         if (stopped || log.count == log.spi.size())
             break;
+        // Use these measurements to compute the NEXT exchange's command here.
+        // The first exchange sends zero with enable off; telemetry is not an ACK.
+        mode = MODE;
+        setpoint = SETPOINT;
+        if (!std::isfinite(setpoint))
+            throw std::runtime_error("Non-finite controller setpoint; stopping.");
+        const float limit = mode == 0 ? CURRENT_LIMIT_A : VOLTAGE_LIMIT_V;
+        setpoint = std::clamp(setpoint, -limit, limit);
+        enabled = true;
         next_release += period_ns;
         // Keep the original time grid; discard releases crossed during work.
         const auto finished = monotonic_ns();

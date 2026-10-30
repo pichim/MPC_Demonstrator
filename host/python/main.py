@@ -76,9 +76,7 @@ def send_command(spi, setpoint, enable, mode=MODE):
 
 
 def exchange(spi, setpoint, enable, mode=MODE):
-    measurements = read_measurements(spi)
-    send_command(spi, setpoint, enable, mode)
-    return measurements
+    return send_command(spi, setpoint, enable, mode)
 
 
 def make_log():
@@ -89,7 +87,7 @@ def make_log():
     capacity = math.floor(Trun * 1_000_000 / PERIOD_US + 0.5)
     if capacity < 1:
         raise ValueError("Trun must round to at least one cycle")
-    # Fixed storage for timing, READ telemetry and the subsequently sent command.
+    # Fixed storage for timing, telemetry and the command sent in the same exchange.
     log = {name: array("d", [0.0]) * capacity for name in ("dt", "spi", "time_s", "voltage_V", "current_A", "motor_position_rad", "motor_velocity_rad_s", "sent_setpoint", "sent_enable", "sent_mode")}
     log["count"] = 0
     log["skipped_releases"] = 0
@@ -104,24 +102,16 @@ def run(spi, log=None):
     previous = None
     run_start = time.perf_counter()
     enabled = False
+    setpoint = 0.0
+    mode = MODE
     while log["count"] < len(log["spi"]):
         start = time.perf_counter()
-        voltage, current, position, velocity = read_measurements(spi)
-        read_end = time.perf_counter()
-        # Future controller computation belongs here, after receiving sensors.
-        mode = MODE
-        setpoint = SETPOINT if enabled else 0.0
-        if not math.isfinite(setpoint):
-            raise RuntimeError("Non-finite controller setpoint; stopping.")
-        limit = CURRENT_LIMIT_A if mode == 0 else VOLTAGE_LIMIT_V
-        setpoint = max(-limit, min(limit, setpoint))
-        command_start = time.perf_counter()
-        send_command(spi, setpoint, enabled, mode)
+        voltage, current, position, velocity = exchange(spi, setpoint, enabled, mode)
         now = time.perf_counter()
         i = log["count"]
         log["dt"][i] = (now - previous) * 1000 if previous is not None else 0.0
-        log["spi"][i] = (read_end - start + now - command_start) * 1000
-        log["time_s"][i] = read_end - run_start
+        log["spi"][i] = (now - start) * 1000
+        log["time_s"][i] = now - run_start
         log["voltage_V"][i] = voltage
         log["current_A"][i] = current
         log["motor_position_rad"][i] = position
@@ -131,9 +121,17 @@ def run(spi, log=None):
         log["sent_mode"][i] = mode
         log["count"] = i + 1
         previous = now
-        enabled = True  # First exchange always sends zero setpoint, disabled.
         if log["count"] == len(log["spi"]):
             break
+        # Use these measurements to compute the NEXT exchange's command here.
+        # The first exchange sends zero with enable off; telemetry is not an ACK.
+        mode = MODE
+        setpoint = SETPOINT
+        if not math.isfinite(setpoint):
+            raise RuntimeError("Non-finite controller setpoint; stopping.")
+        limit = CURRENT_LIMIT_A if mode == 0 else VOLTAGE_LIMIT_V
+        setpoint = max(-limit, min(limit, setpoint))
+        enabled = True
         next_release += period_ns
         # Keep the original time grid; discard releases crossed during work.
         finished = time.monotonic_ns()

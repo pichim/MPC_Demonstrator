@@ -1,13 +1,25 @@
 # Communication development and validation record
 
 This is the consolidated record of the SPI experiments on the Raspberry Pi 5
-and NUCLEO-F446RE, through 2026-09-28. It includes unsuccessful experiments and
-unresolved cases. The board has no motor or sensor hardware attached; output
+and NUCLEO-F446RE, including timing experiments through 2026-10-30 and the
+single-exchange host validation. It includes unsuccessful experiments and unresolved
+cases. The board has no motor or sensor hardware attached; output
 register checks are not physical actuator tests. See [README](../README.md) for
 current build/run instructions; historical commands below require their matching
 firmware and clients.
 
-## CPU-core isolation — 2026-09-28
+## Current baseline
+
+Both hosts retain 1 kHz fixed monotonic scheduling and 18-byte CRC-8 frames, with
+one NSS-framed COMMAND/telemetry exchange per cycle. The received telemetry feeds
+the next cycle's command; the first exchange is disabled. This supersedes the
+READ → compute → COMMAND host sequence in commit `ba9dc97`.
+The MCU motor task runs every 50 µs; a separate worker handles SPI recovery.
+See the single-exchange validation below and the root README for
+current settings and commands. Earlier sections preserve checkpoint-specific
+behavior, paths, test counts and measurements; they are not current instructions.
+
+## CPU-core isolation — 2026-09-28 (historical checkpoint)
 
 README documents the optional `isolcpus=3 irqaffinity=0-2` boot settings and
 running either host on CPU 3 with `taskset -c 3 chrt -f 50`. The active system
@@ -21,9 +33,10 @@ Full tickless support requires a different kernel build. The timing benefit
 of isolation has not been established by a controlled comparison.
 
 The subsequent fixed-schedule timing experiment was reverted at the user's
-request. Both clients retain pacing relative to each actual cycle start and
-the original CSV format and analyzer; only the core-isolation documentation
-is retained. No kernel or boot settings were changed during this revert.
+request. At that checkpoint both clients retained pacing relative to each actual
+cycle start and the original CSV format and analyzer; only the core-isolation
+documentation was retained. The September 29 implementation below supersedes
+that pacing decision. No kernel or boot settings were changed during the revert.
 
 ## Full review against the original SPI port — 2026-09-26
 
@@ -316,7 +329,7 @@ The latest host conversion uses a rounded integer cycle count from `Trun` and
 headers. Run CPU/wall totals are repeated metadata, counted once by the analyzer.
 Historical text logs and measurements above predate this format.
 
-## Current host and commit validation
+## Host and commit validation — 2026-09-26 (historical checkpoint)
 
 The current Python/C++ baseline has the same settings and sequence: READ → compute
 → COMMAND → record → sleep. Application settings live in each main file; NSS
@@ -413,7 +426,7 @@ Raw CSVs, run order, temporary native source/binary and per-run results are in
 `/tmp/mpc-affinity-study-rkoh3vno/` on this Pi; these temporary artifacts are not
 committed. No source/runtime changes were required by the comparison.
 
-## Current decision
+## NSS transport decision — 2026-09-25 (historical checkpoint)
 
 Keep NSS-framed normal DMA with immutable telemetry, two useful exchanges per
 cycle (READ → compute → COMMAND), and 30 µs setup / minimum NSS-high margins.
@@ -471,7 +484,7 @@ budget. No MPC computation or physical sample-to-actuation measurement is includ
 
 ## Evidence index
 
-1. [Current NSS implementation and hardware results](#nss-results)
+1. [NSS implementation and hardware results — 2026-09-25](#nss-results)
 2. [Legacy ARM, four-frame, Python profiling and task cleanup experiments](#arm-results)
 3. [Python versus native C++ comparison](#host-results)
 4. [MCU microsecond-ticker optimization](#ticker-results)
@@ -496,7 +509,7 @@ Older source and firmware snapshots remain in `build/checkpoints/`.
 
 <a id="nss-results"></a>
 
-## Current NSS implementation and hardware results
+## NSS implementation and hardware results — 2026-09-25 (historical checkpoint)
 
 ### NSS transport validation — 2026-09-25
 
@@ -1886,3 +1899,125 @@ pre-change firmware. No further hardware runs were needed for documentation-only
 edits. The accepted 1 kHz timing evidence is above; it is not a worst-case bound
 or a guarantee of bug-free operation. No commit or staging operation was performed.
 Include `host/tests/test_periodic.py` when staging the five changed/new files.
+
+
+## Documentation cleanup and quick hardware check — 2026-10-30
+
+Resumed from committed baseline `ba9dc97`. Clarified current versus historical
+protocol/scheduling descriptions, documented the local Mbed dependency revision
+and ST-LINK flashing fallback, and corrected comments about first-cycle commands,
+telemetry publication and the motor-task debug pulse. No runtime logic, settings,
+wire format, priorities or timing margins changed.
+
+Both host and MCU builds passed, along with six host regression tests, the MCU
+command-policy test, Python byte-compilation and whitespace checks. The Nucleo
+USB drive was mounted read-only; OpenOCD programmed the rebuilt ELF through
+ST-LINK, verified it successfully and reset the target.
+
+The disabled-command checker passed 1,000 cycles at a 1 kHz target (mean cycle
+1.002 ms), then two rounds of seven malformed-frame cases plus cancellation and
+held-NSS timeout, with 100 valid cycles after every case: 2,800 normal cycles and
+18 fault injections in total. It used CPU 3, FIFO priority 50 and requested 30 MHz.
+This is a quick framing/recovery check, not a new jitter comparison or an enabled
+motor-control test. No enabled commands were sent by this check.
+
+Reproduce the hardware check:
+
+```sh
+sudo taskset -c 3 chrt -f 50 python3 host/tests/check_spi.py \
+  --count 1000 --period-us 1000 --faults --fault-rounds 2
+```
+
+Flashed firmware SHA-256:
+`4a8eb1d8559fec6bbe1bf8790136f89d95e4ee71c815c7d92551c4b47c2458f9`.
+
+## Single exchange per host cycle — 2026-10-30
+
+Both production hosts now send COMMAND and use its simultaneous telemetry reply
+once per periodic cycle. The separate READ is removed from the loop. The first
+exchange sends zero with enable off; subsequent commands are prepared after
+receiving and logging the previous exchange. Telemetry from exchange `k` can first
+affect command `k+1`, nominally one host period later, longer after skipped releases.
+The final disabled command remains outside the periodic loop. There is no mode
+flag, protocol change, or MCU/transport runtime change. READ remains supported for
+diagnostics. Python's exchange helper also makes the recovery checker use one burst.
+
+CSV columns are unchanged, but telemetry now belongs to the same exchange as the
+logged transmitted command; it predates application of that command. `time_s`
+timestamps exchange completion and SPI time measures one call. Neither a valid
+reply nor these tests establishes that a command was applied to physical hardware.
+
+Release C++ build and the existing MCU build passed. The MCU binary SHA-256 is
+unchanged from the maintenance check above, so no flash was needed. Twelve host
+tests (including a C++ harness running the production code with fake syscalls) and
+the MCU command-policy test pass. The new tests cover one exchange per cycle,
+startup, telemetry/command logging, timing, command limits, non-finite controller
+output, malformed replies, transport failure, interruption, final-disable failure,
+and shutdown. Existing scheduling and NSS transport checks remain in place.
+
+The disabled-command hardware checker passed 2,000 baseline exchanges plus three
+rounds of nine fault cases with 100 valid exchanges after each: 4,700 normal
+exchanges and 27 fault injections. Cases cover short/long frames, CRC/header
+errors, cancellation, and held-NSS timeout. CPU 3, FIFO priority 50, requested
+30 MHz and the existing 30 µs setup/inactive margins were used.
+
+A sequential comparison ran each old/new C++/Python host for 20,000 cycles at the
+production defaults: 1 kHz, 0.08 A current command after the initial disabled
+cycle, CPU 3 and FIFO priority 50. All four runs exited successfully, with valid
+replies, zero skipped releases and no final-disable errors. No builds ran during
+timing. The board still has no motor or sensors attached; telemetry does not
+constitute physical control validation.
+
+Times below are µs. SPI includes software overhead and NSS waits; CPU is percent
+of one core. These are single finite runs per configuration, not worst-case bounds.
+
+| Client | Exchanges/cycle | Mean SPI | p99 SPI | Max SPI | p99 dt | Max dt | CPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| C++ before | 2 | 159.8 | 161.4 | 182.8 | 1001.8 | 1016.8 | 5.49% |
+| C++ after | 1 | 62.1 | 64.5 | 93.9 | 1001.9 | 1039.1 | 1.24% |
+| Python before | 2 | 167.0 | 170.8 | 256.1 | 1003.8 | 1035.9 | 6.60% |
+| Python after | 1 | 71.5 | 74.2 | 850.9 | 1002.9 | 1823.8 | 2.56% |
+
+Average communication cost fell about 61% in C++ and 57% in Python. Python had a
+large isolated timing excursion despite the improved mean/p99; zero skips does
+not mean no late cycles. This comparison does not isolate its cause, establish
+better worst-case jitter, or validate closed-loop performance with the added
+feedback delay. Scheduling and error handling retain their existing behavior.
+
+Local artifacts are in `host/build/single-exchange-20261030/`: old source copies,
+baseline binary, recovery output, before/after CSVs and stderr, `comparison.json`,
+and `compare.py` to repeat the four-run comparison. The existing CSV analyzer
+accepted both new logs. The previously staged patch was preserved byte-for-byte;
+the new changes are left unstaged for review.
+
+## Student handover review — 2026-10-30
+
+Reviewed the complete staged change, including the single-exchange loops, NSS/DMA
+ownership, command validation, startup/shutdown, logging, release scheduling and
+documentation. No production-code defect was found in the change. The review did
+find that the new tests assumed the production defaults: changing Python to
+voltage mode or C++ to an over-limit setpoint caused false failures, and the C++
+harness required sufficient log capacity for its scenarios.
+
+The tests now use explicit fixtures. The C++ runner changes only settings in a
+temporary source copy, keeping application logic and transport intact. It tests
+the nominal current command plus positive/negative clamping in both modes, with
+five cycles so interruption at cycle three exercises early shutdown. The Python
+tests accept either configured mode and fix their runtime/limit fixtures. These
+changes do not alter the production hosts, firmware, or transport. README now
+explains test setup, controller insertion and the old/new CSV pairing distinction.
+
+All twelve host tests and the MCU command-policy test passed again. An isolated
+copy with voltage mode, 250 µs period, one configured cycle, grouped reporting and
+changed command limits also passed the suite. Removing either host's clamp in
+temporary copies caused the corresponding tests to fail. The new C++ fixture
+cases compile with optimization (`-O2`). A fresh Release host build passed; the
+MCU build check passed with the same firmware hash recorded above.
+
+The C++ harness also passed AddressSanitizer and UndefinedBehaviorSanitizer with
+the production defaults. LeakSanitizer could not operate in the sandbox and was
+disabled for that run; no leak-check result is claimed. No hardware rerun was
+needed because production code is unchanged from the hardware-tested version.
+The existing timing excursions, lack of command acknowledgement, variable feedback
+delay after skipped releases, and absence of physical motor/MPC validation remain
+explicit limits of this communication baseline.

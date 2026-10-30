@@ -63,7 +63,7 @@ public:
     bool start();
 
     // Update voltage (before compensation), current, position and velocity.
-    // Update 4 floats (thread-safe; copied atomically into next TX frame)
+    // Publish four floats under a critical section; NSS later copies the snapshot.
     void setReplyData(float voltage, float current, float position, float velocity);
 
     // Atomically consume the latest command, if any. Intermediate commands

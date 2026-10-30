@@ -15,14 +15,12 @@ class PeriodicTests(unittest.TestCase):
         starts, commands = [], []
         sleeps = 0
 
-        def read(spi):
-            starts.append(now)
-            return (0.0,) * 4
-
         def send(spi, setpoint, enabled, mode):
             nonlocal now
+            starts.append(now)
             commands.append(enabled)
             now += work_delay if len(commands) == 1 else 100_000
+            return (0.0,) * 4
 
         def sleep(seconds):
             nonlocal now, sleeps
@@ -30,7 +28,7 @@ class PeriodicTests(unittest.TestCase):
             sleeps += 1
 
         with patch.object(loop, 'PERIOD_US', 250), patch.object(loop, 'Trun', 0.00075), \
-             patch.object(loop, 'read_measurements', read), patch.object(loop, 'send_command', send), \
+             patch.object(loop, 'send_command', send), \
              patch.object(loop.time, 'monotonic_ns', lambda: now), \
              patch.object(loop.time, 'perf_counter', lambda: now / 1e9), \
              patch.object(loop.time, 'sleep', sleep):

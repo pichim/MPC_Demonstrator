@@ -1,8 +1,9 @@
 # MPC Demonstrator
 
 Raspberry Pi SPI master and NUCLEO-F446RE firmware for a future MPC controller.
-The Pi reads telemetry, computes a command (currently a fixed test setpoint),
-then sends it. The MCU runs a motor task every **50 µs**, selecting either current
+The Pi exchanges a command and telemetry in one full-duplex SPI transaction per
+cycle, then computes the next command (currently a fixed test setpoint).
+The MCU runs a motor task every **50 µs**, selecting either current
 control or direct voltage. Only the motor is used; there is no pendulum path.
 
 Development uses VS Code over SSH on the Pi. Currently no motor or sensors are
@@ -20,6 +21,9 @@ research sources and remaining limitations are in
 Terminal builds belong in `mcu/build` and `host/build`; VS Code uses
 `mcu/build/NUCLEO_F446RE-Develop` for the MCU.
 Historical local checkpoints remain in `mcu/build/checkpoints/`.
+The local `mcu/mbed-os` dependency and its Python environment are Git-ignored,
+not supplied by cloning this repository. The dependency used on this Pi is Mbed CE
+revision `e2651ad855b9cd22a84b143a52b2d68ed49fa939`.
 
 ## Wiring
 
@@ -217,9 +221,12 @@ not measurements and are excluded using `dt_n=0`. `cpu_s` and `wall_s`
 are whole-run totals repeated on each row; use them once, do not sum them.
 Larger N preserves timing-window statistics; data columns then contain the **last
 cycle** of that window, not averages. Keep N=1 for identification/controller logs.
-`time_s` is host READ-completion time relative to loop start, not an MCU sample
-timestamp. The motor data were received **before** the command in the same row was
-sent. `sent_setpoint` is in A for `sent_mode=0`, V for `sent_mode=1`; in current mode
+`time_s` is host exchange-completion time relative to loop start, not an MCU sample
+timestamp. Each row pairs telemetry with the command **sent in the same exchange**.
+The telemetry snapshot predates application of that command; it is not an ACK.
+Older READ/COMMAND logs have the same columns but different telemetry/command
+pairing. Keep the source revision with each log when comparing experiments.
+`sent_setpoint` is in A for `sent_mode=0`, V for `sent_mode=1`; in current mode
 it already includes the host's ±1 A clamp (voltage mode: ±24 V). `voltage_V` is the MCU's limited applied
 voltage command **before compensation**, not an ADC measurement of terminal voltage.
 Motor data and timestamps use six decimals; timing statistics use four. The timing
@@ -249,12 +256,17 @@ at sorted index `0.99 * (sample_count - 1)` and requires N=1 logs; it is reporte
 as unavailable for grouped windows. The first missing interval is excluded.
 
 `dt` measures command-reply completion intervals, including pacing and scheduling.
-SPI time sums READ and COMMAND calls, including software overhead and NSS waits;
+SPI time measures the single COMMAND/telemetry call, including software overhead and NSS waits;
 it is not wire-only timing. CPU usage is process CPU time divided by elapsed run
 time (100% means one core), excluding buffer allocation, SPI setup, final disable
 and reporting. Timestamping and storing samples still add overhead.
 
-Both use the same single-threaded READ → compute → COMMAND → record → sleep flow.
+Both use the same single-threaded COMMAND/telemetry → record → compute next command
+→ sleep flow. The first exchange sends zero with enable off and obtains initial
+telemetry. Measurements received in exchange `k` can first affect the command in
+exchange `k+1`: nominally one host period later, longer if releases are skipped.
+The last cycle does not compute another command; shutdown sends a separate disabled
+command outside the periodic loop. There is no extra startup READ.
 `chrt` sets FIFO priority 50. Both clients advance a fixed monotonic release
 schedule each period, so ordinary wake-up lateness does not accumulate as drift.
 Releases crossed during work are skipped; a wake delayed by whole periods executes
@@ -328,22 +340,27 @@ is not constrained by the host current-command limit.
 | -------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `mcu/include/config.h`                             | MCU pins, periods, priorities and controller settings                            |
 | `mcu/src/main.cpp`                                 | Construct hardware/tasks and start them                                          |
-| `mcu/lib/MotorControlThread/`                    | 50 µs High2 task: motor sensors, mode handover, control, expiry                  |
-| `mcu/lib/IO_handler/`                              | Motor encoder, current ADC, PWM, direction and enable                                 |
+| `mcu/lib/MotorControlThread/`                      | 50 µs High2 task: motor sensors, mode handover, control, expiry                  |
+| `mcu/lib/IO_handler/`                              | Motor encoder, current ADC, PWM, direction and enable                            |
 | `mcu/lib/SPISlaveDMA/`                             | NSS handlers, immutable DMA frame, latest-command mailbox, High1 recovery worker |
-| `host/python/main.py`, `host/src/main.cpp`         | Single-threaded READ → compute → COMMAND loop and timing output                  |
+| `host/python/main.py`, `host/src/main.cpp`         | Single-exchange command/telemetry loop, next-command computation and timing output |
 | `host/python/spi_nss.py`, `host/lib/Spi/spi_nss.h` | NSS transport                                                                    |
 | `host/lib/Spi/protocol.h`                          | Native SPI wire encoding and reply validation                                    |
 | `mcu/tests/`                                       | MCU command-policy regression test                                               |
-| `host/tests/`                                      | Python transport tests and disabled-command hardware checks                      |
+| `host/tests/`                                      | C++/Python loop tests, Python scheduling/transport tests and hardware checks       |
 
 Libraries inherited from the last commit remain in `mcu/lib/`, including currently
 unused utilities. They are retained for future coursework.
 
 The native host keeps `src/` and `lib/Spi/`; Python keeps its client, transport, and timing analyzer
 under `host/python/`. Add controller computation at the marked location in `run`,
-after reading measurements and before sending the command. The current code is a
+after receiving and logging measurements, to prepare the next cycle's command.
+Account for this feedback delay in the controller design. The current code is a
 constant-current baseline; no estimator or MPC solver is integrated.
+Replace the fixed `setpoint = SETPOINT` assignment with the controller result,
+retaining the finite-value check and command limits below it. Use the measurements
+already received by that iteration; an additional READ would break the one-exchange
+cycle. Logging above this block records the command already sent.
 
 The MCU motor task continues to own controller/filter state and outputs. Short
 critical sections protect coherent snapshots and the single latest command;
@@ -357,7 +374,9 @@ buffer. Before another exchange the client enforces at least **30 µs NSS high**
 controller computation can cover that interval. NSS settings are in `host/lib/Spi/spi_nss.h`
 and `host/python/spi_nss.py`; keep them aligned.
 
-There are exactly two useful bursts per cycle: **READ → compute → COMMAND**.
+There is exactly one data burst per cycle: **COMMAND and telemetry simultaneously**.
+The two ioctl descriptors provide a clock-free setup delay followed by that burst;
+they do not produce two data transmissions. READ remains available for diagnostics.
 No ARM transfer or extra signaling is used. Timing margins are minimum waits;
 Linux may extend them. The MCU rejects selections held beyond 20 ms. Normal frame
 handling and bounded peripheral reset run in the NSS interrupt; the worker polls
@@ -367,7 +386,8 @@ for timeout and performs fallback recovery. No HAL polling loop runs in the IRQ.
 
 Every frame is **18 bytes**: one header, four little-endian float32 values, CRC-8
 (poly 0x07, initial value zero, over the first 17 bytes). Firmware and both hosts
-must be updated together: the previous 14-byte protocol is incompatible.
+must use matching wire formats: the previous 14-byte protocol is incompatible.
+The single-exchange hosts use the existing 18-byte firmware without MCU changes.
 
 | Frame   | Header | Four payload values                                                                    |
 | ------- | ------ | -------------------------------------------------------------------------------------- |
@@ -375,9 +395,10 @@ must be updated together: the previous 14-byte protocol is incompatible.
 | COMMAND | `0x55` | Setpoint, enable (0/1), mode (0=current / 1=voltage), reserved zero                    |
 | REPLY   | `0x45` | Applied voltage before compensation (V), current (A), position (rad), velocity (rad/s) |
 
-Both exchanges return telemetry selected before receiving that request. COMMAND's
+Both request types return telemetry selected before receiving that request. COMMAND's
 reply is not an application ACK. There is no sequence number or sample timestamp,
-so 50 µs sampling is not a guarantee of 50 µs data age at the Pi.
+so 50 µs sampling is not a guarantee of 50 µs data age at the Pi. A bad reply also
+does not prove that the outgoing command was rejected; hosts stop and attempt disable.
 
 Only CRC-valid commands with finite setpoint, valid mode/enable and reserved zero refresh
 the **300 ms command expiry**, measured from MCU receipt. Reads and corrupt frames
@@ -399,6 +420,12 @@ Run regression checks from the repository root, without hardware:
 python3 -m unittest discover -s mcu/tests -v
 python3 -m unittest discover -s host/tests -v
 ```
+
+The tests require native `g++` and Python's standard library. They use controlled
+settings and fake SPI/clocks, so editing the hosts' operating settings does not
+change their test cases. The C++ test runner copies the application to a temporary
+directory, replaces only its settings, and tests the unchanged logic in both modes
+with positive and negative command limits. It does not open the SPI device.
 
 Run the existing disabled-command hardware recovery checker from the repository root:
 
