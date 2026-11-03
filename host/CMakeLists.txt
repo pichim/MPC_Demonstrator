@@ -7,8 +7,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(mpc_spi src/main.cpp)
+#add_executable(mpc_spi src/frequ_analysis.cpp)
 target_include_directories(mpc_spi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/MPCcontroller
+    ${CMAKE_CURRENT_SOURCE_DIR}/chirp
     ${CMAKE_CURRENT_SOURCE_DIR}/../mcu/lib/eigen-lib)
 target_include_directories(mpc_spi PRIVATE lib/Spi)
 #target_compile_options(mpc_spi PRIVATE -Wall -Wextra -Wpedantic -Werror)

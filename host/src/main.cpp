@@ -9,6 +9,12 @@
 #define Trun 10.0              // Nominal seconds; converted to a rounded integer cycle count.
 #define PRINT_EVERY 1         // Samples per report after stopping; 0 reports all at once.
 
+
+#define SPEED_MODE 0              // 0: position control, 1: speed control
+#define SPEED_REF_RPM 500.0
+#define SPEED_T_START 1.0         // s, when the speed ref steps on
+#define SPEED_MAX_LEAD_RAD 10.0
+
 #include <algorithm>
 #include <cmath>
 #include <csignal>
@@ -105,6 +111,18 @@ static_assert((MODE == 0 || MODE == 1) && CURRENT_LIMIT_A > 0.0f &&
                   VOLTAGE_LIMIT_V <= std::numeric_limits<float>::max(),
               "Invalid mode/command limits");
 
+struct SpeedToPosRef {
+    double p_int = 0.0;
+    bool init = false;
+    double step(double v_ref, double p_meas, double Ts, double max_lead)
+    {
+        if (!init) { p_int = p_meas; init = true; }
+        p_int += v_ref * Ts;
+        p_int = std::clamp(p_int, p_meas - max_lead, p_meas + max_lead);
+        return p_int;
+    }
+};
+
 void run(NssSPI &spi, Log &log)
 {
     const auto run_start = monotonic_ns();
@@ -142,6 +160,8 @@ void run(NssSPI &spi, Log &log)
     double theta0 = 0.0;
     bool have_theta0 = false;
 
+    SpeedToPosRef s2p;
+
     while (!stopped && log.count < log.spi.size()) {
         const auto start = monotonic_ns();
         const auto measurements = read_measurements(spi);
@@ -158,7 +178,13 @@ void run(NssSPI &spi, Log &log)
         double theta_ref = ref::reference(t);
         //double theta_ref = 2*3.141592;
 
+#if SPEED_MODE
+        const double v_ref = (enabled && t >= SPEED_T_START) ? SPEED_REF_RPM * M_PI / 30.0 : 0.0;
+        theta_ref = s2p.step(v_ref, position, PERIOD_US * 1e-6, SPEED_MAX_LEAD_RAD);
+#endif
+
         const auto mpc_t0 = monotonic_ns();
+
 #if MODE == 1
         Controller::Result r = ctrl.step(xmeas, theta_ref);
 #else
