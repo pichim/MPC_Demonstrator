@@ -31,19 +31,18 @@ public:
     using VecM   = Eigen::Matrix<double, MM, 1>;
     using VecXA  = Eigen::Matrix<double, NXA, 1>;
     using VecX   = Eigen::Matrix<double, NX, 1>;
-    using VecP   = Eigen::Matrix<double, NX + 3, 1>;   
-    using MatFf  = Eigen::Matrix<double, N, NX + 3>;
-    using MatEb  = Eigen::Matrix<double, MM, NX + 2>;  
+    using VecP   = Eigen::Matrix<double, NX + 2, 1>;
+    using MatFf  = Eigen::Matrix<double, N, NX + 2>;
+    using MatEb  = Eigen::Matrix<double, MM, NX + 2>;
     using MatAcl = Eigen::Matrix<double, NXA, NXA>;
     using MatLg  = Eigen::Matrix<double, NXA, 2>;
 
-   
-    static constexpr int    MAX_IT      = 50;     
-    static constexpr double TOL_FEAS    = 1e-4;   
-    static constexpr double TOL_MU      = 1e-4;   
+    static constexpr int    MAX_IT      = 50;
+    static constexpr double TOL_FEAS    = 1e-4;
+    static constexpr double TOL_MU      = 1e-4;
     static constexpr double TAU         = 0.995;
-    static constexpr double W_INIT_MIN  = 1e-1;   
-    static constexpr double W_INIT_MU   = 1e-1;   
+    static constexpr double W_INIT_MIN  = 1e-1;
+    static constexpr double W_INIT_MU   = 1e-1;
     static constexpr double REG         = 1e-6;
 
     MpcController(const Eigen::MatrixXd& H_, const Eigen::MatrixXd& Aineq_,
@@ -104,7 +103,7 @@ public:
         sVal.assign(MM, 0.0);
         for (int i = 0; i < MM; ++i) {
             rowPtr[i] = (int)uIdx.size();
-            for (int j = 0; j < N; ++j)                       
+            for (int j = 0; j < N; ++j)
                 if (std::abs(A(i, j)) > eps) { uIdx.push_back(j); uVal.push_back(A(i, j)); }
             int ns = 0;
             for (int j = N; j < NN; ++j)
@@ -116,12 +115,10 @@ public:
         }
         rowPtr[MM] = (int)uIdx.size();
 
-        VecS FrRef = VecS::Zero();                           
-        for (int k = 0; k < N; ++k) FrRef += Fr_.col(3*k + 2);
+        for (int k = 0; k < N; ++k) Frp.col(k) = Fr_.col(3*k + 2);
         Ff.template leftCols<NX>() = Fx_;
         Ff.col(NX)     = Fu0_;
         Ff.col(NX + 1) = Fd_;
-        Ff.col(NX + 2) = FrRef;
         Eb.template leftCols<NX>() = Ex_;
         Eb.col(NX)     = Eu0_;
         Eb.col(NX + 1) = Ed_;
@@ -145,7 +142,7 @@ public:
         int fault;
     };
 
-    Result step(const Eigen::Vector2d& xmeas, double theta_ref) {
+    Result step(const Eigen::Vector2d& xmeas, const VecS& rref) {
         Result out;
         out.status = 0; out.iters = 0; out.fault = 0;
 
@@ -153,19 +150,19 @@ public:
         if (!z_prev.allFinite()) z_prev.setZero();
         if (!std::isfinite(u_prev_valid)) u_prev_valid = 0.0;
 
-        if (!(std::isfinite(xmeas(0)) && std::isfinite(xmeas(1)) && std::isfinite(theta_ref))) {
+        if (!(std::isfinite(xmeas(0)) && std::isfinite(xmeas(1)) && rref.allFinite())) {
             fallback(out);
             out.xhat = xhat;
             return out;
         }
 
         VecP p;
-        p << xhat.template head<NX>(), u_prev_valid, xhat(NX), theta_ref;
+        p << xhat.template head<NX>(), u_prev_valid, xhat(NX);
 
         VecN f;
-        f.template head<N>() = Ff * p;
+        f.template head<N>() = Ff * p + Frp * rref;
         f.template tail<N>().setZero();
-        VecM bineq = bconst + Eb * p.template head<NX + 2>();
+        VecM bineq = bconst + Eb * p;
 
         if (!f.allFinite() || !bineq.allFinite()) {
             fallback(out);
@@ -213,11 +210,15 @@ public:
         return out;
     }
 
+    Result step(const Eigen::Vector2d& xmeas, double theta_ref) {
+        return step(xmeas, VecS::Constant(theta_ref));
+    }
+
 private:
-   
     MatU  Hu, HuReg;
     VecS  hs, hsReg;
     MatFf Ff;
+    MatU  Frp;
     MatEb Eb;
     VecM  bconst;
     MatAcl Acl;
@@ -273,7 +274,7 @@ private:
     }
 
     void factorize(const VecM& Wm) {
-        S = HuReg;          
+        S = HuReg;
         D = hsReg;
         B.setZero();
         for (int i = 0; i < MM; ++i) {
@@ -282,7 +283,7 @@ private:
             for (int a = k0; a < k1; ++a) {
                 const int p = uIdx[a];
                 const double wa = wi * uVal[a];
-                for (int b = k0; b <= a; ++b) S(p, uIdx[b]) += wa * uVal[b];   // uIdx[b] <= p
+                for (int b = k0; b <= a; ++b) S(p, uIdx[b]) += wa * uVal[b];
             }
             const int q = sCol[i];
             if (q >= 0) {
@@ -326,7 +327,7 @@ private:
 
         mulA(z, Az);
         VecM w   = (b - Az).cwiseMax(W_INIT_MIN);
-        VecM lam = (W_INIT_MU * w.cwiseInverse()).cwiseMax(1e-6);   // centred start
+        VecM lam = (W_INIT_MU * w.cwiseInverse()).cwiseMax(1e-6);
 
         status = 0; iters = 0;
 

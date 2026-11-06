@@ -13,7 +13,7 @@ namespace mpc_current_ref_fixed {
     constexpr int NXA = 3;
     constexpr int NN  = 2 * N;
     constexpr int MM  = 5 * N;
-    constexpr int NR  = N; 
+    constexpr int NR  = N;
 }
 
 class MpcControllerCurr {
@@ -31,8 +31,8 @@ public:
     using VecM   = Eigen::Matrix<double, MM, 1>;
     using VecXA  = Eigen::Matrix<double, NXA, 1>;
     using VecX   = Eigen::Matrix<double, NX, 1>;
-    using VecP   = Eigen::Matrix<double, NX + 3, 1>;
-    using MatFf  = Eigen::Matrix<double, N, NX + 3>;
+    using VecP   = Eigen::Matrix<double, NX + 2, 1>;
+    using MatFf  = Eigen::Matrix<double, N, NX + 2>;
     using MatEb  = Eigen::Matrix<double, MM, NX + 2>;
     using MatAcl = Eigen::Matrix<double, NXA, NXA>;
     using MatLg  = Eigen::Matrix<double, NXA, 1>;
@@ -67,7 +67,7 @@ public:
         check("Fx", (int)Fx_.rows(), (int)Fx_.cols(), N, NX);
         check("Fu0", (int)Fu0_.size(), 1, N, 1);
         check("Fd", (int)Fd_.size(), 1, N, 1);
-        check("Fr", (int)Fr_.rows(), (int)Fr_.cols(), N, NR); // Validates 20x20
+        check("Fr", (int)Fr_.rows(), (int)Fr_.cols(), N, NR);
         check("Ex", (int)Ex_.rows(), (int)Ex_.cols(), MM, NX);
         check("Eu0", (int)Eu0_.size(), 1, MM, 1);
         check("Ed", (int)Ed_.size(), 1, MM, 1);
@@ -116,12 +116,11 @@ public:
         }
         rowPtr[MM] = (int)uIdx.size();
 
-        VecS FrRef = Fr_.rowwise().sum();
+        Frp = Fr_;
 
         Ff.template leftCols<NX>() = Fx_;
         Ff.col(NX)     = Fu0_;
         Ff.col(NX + 1) = Fd_;
-        Ff.col(NX + 2) = FrRef;
 
         Eb.template leftCols<NX>() = Ex_;
         Eb.col(NX)     = Eu0_;
@@ -155,7 +154,7 @@ public:
         int fault;
     };
 
-    Result step(double ymeas, double theta_ref) {
+    Result step(double ymeas, const VecS& rref) {
         Result out;
         out.status = 0; out.iters = 0; out.fault = 0;
 
@@ -163,7 +162,7 @@ public:
         if (!z_prev.allFinite()) z_prev.setZero();
         if (!std::isfinite(u_prev_valid)) u_prev_valid = 0.0;
 
-        if (!(std::isfinite(ymeas) && std::isfinite(theta_ref))) {
+        if (!(std::isfinite(ymeas) && rref.allFinite())) {
             fallback(out);
             out.xhat = xhat;
             return out;
@@ -172,12 +171,12 @@ public:
         const double u_old = u_prev_valid;
         const VecXA xp = Aaug * xhat + Baug * u_old;
         VecP p;
-        p << xp.template head<NX>(), u_old, xp(NX), theta_ref;
+        p << xp.template head<NX>(), u_old, xp(NX);
 
         VecN f;
-        f.template head<N>() = Ff * p;
+        f.template head<N>() = Ff * p + Frp * rref;
         f.template tail<N>().setZero();
-        VecM bineq = bconst + Eb * p.template head<NX + 2>();
+        VecM bineq = bconst + Eb * p;
 
         if (!f.allFinite() || !bineq.allFinite()) {
             fallback(out);
@@ -225,10 +224,15 @@ public:
         return out;
     }
 
+    Result step(double ymeas, double theta_ref) {
+        return step(ymeas, VecS::Constant(theta_ref));
+    }
+
 private:
     MatU   Hu, HuReg;
     VecS   hs, hsReg;
     MatFf  Ff;
+    MatU   Frp;
     MatEb  Eb;
     VecM   bconst;
     MatAcl Aaug;

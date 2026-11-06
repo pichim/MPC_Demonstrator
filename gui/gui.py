@@ -1,97 +1,95 @@
 """
-needed packages:  pip install PySide6 pyqtgraph paramiko
-versions: 
-    msgpack-numpy==0.4.8
-    numpy==1.26.2
-    paramiko==5.1.0
-    pyqtgraph==0.14.0
-    PySide6==6.12.0
-    PySide6_Addons==6.12.0
-    PySide6_Essentials==6.12.0
-    PySide6_Pdf==6.12.0.140
-    PySide6_WebEngine==6.12.0.140
+needed packages and versions:
+
+msgpack-numpy==0.4.8
+numpy==1.26.2
+paramiko==5.1.0
+pyqtgraph==0.14.0
+PySide6==6.12.0
+PySide6_Addons==6.12.0
+PySide6_Essentials==6.12.0
+PySide6_Pdf==6.12.0.140
+PySide6_WebEngine==6.12.0.140
 """
+
 import os, sys, math, csv, time, socket, threading, collections
 from datetime import datetime
 import pyqtgraph as pg
-from PySide6 import QtWidgets, QtCore
+from PySide6 import QtWidgets as QW, QtCore as QC
 
 try:
     import paramiko
-except ImportError:           
+except ImportError:
     paramiko = None
 
-FIELDS = ["t", "pos_ref", "vel_ref", "pos", "vel", "i_q", "u",
-          "mpc_iter", "fault", "mpc_us", "spi_us", "total_us"]
+FIELDS = ["t", "pos_ref", "vel_ref", "pos", "vel", "i_q", "u", "mpc_iter", "fault", "mpc_us", "spi_us", "total_us"]
 CSV_HEADERS = ["Time (s)", "Position ref (rad)", "Velocity ref (rad/s)", "Position (rad)", "Velocity (rad/s)",
                "Current (A)", "Controller output (V or A)", "MPC iterations", "Solver fault",
                "MPC time (us)", "SPI time (us)", "Total time (us)"]
-WINDOW_S = 10.0
-SAMPLE_DT = 0.01
-DECIMALS = 3          
-MAX_STEP_REV = 30     
-LEGEND_W = 130        
-AXIS_W = 70          
 
+WINDOW_S, SAMPLE_DT, DECIMALS = 10.0, 0.01, 3
+MAX_STEP_RAD = 30 * 2 * math.pi
+PREVIEW_MAX_RAD, SPEED_MAX = 1e6, 80
+LEGEND_W, AXIS_W = 130, 70
 PI_PROJECT_DIR = "/home/pi/MPC_Demonstrator"
-PI_PROGRAM = "mpc_spi"          
+PI_PROGRAM = "mpc_spi"
 PI_SERVER_COMMAND = (f"sudo -S -p '' taskset -c 3 chrt -f 50 "
                      f"{PI_PROJECT_DIR}/host/build/{PI_PROGRAM} --matrices {PI_PROJECT_DIR}/host")
-PING_PERIOD_S = 0.25  
- 
+PING_PERIOD_S = 0.25
+
+TABS = [
+    ("Motion", [
+        dict(title="Position", axis="Position (rad)", lines=[("pos_ref", "#e67e22", "Ref"), ("pos", "#1f77b4", "Measured")]),
+        dict(title="Velocity", axis="Velocity (rad/s)", lines=[("vel_ref", "#e67e22", "Ref"), ("vel", "#1f77b4", "Measured")])]),
+    ("Current / Voltage", [
+        dict(title="Current", axis="Current (A)", lines=[("i_q", "#9b59b6", "Current")]),
+        dict(title="Controller output", axis="Voltage (V)", lines=[("u", "#2ca02c", "Command")], is_output=True)]),
+    ("Timing", [
+        dict(title="Computation time", axis="Time (µs)", dec=0,
+             lines=[("mpc_us", "#1f77b4", "MPC solve"), ("spi_us", "#e67e22", "SPI")]),
+        dict(title="Total (MPC + SPI)", axis="Time (µs)", dec=0, lines=[("total_us", "k", "Total")],
+             limit=(1000, "1 ms limit"), ylim=(0, 1200))]),
+    ("Solver", [
+        dict(title="MPC iterations", axis="Iterations", dec=0, lines=[("mpc_iter", "#1f77b4", "Iterations")],
+             limit=(50, "Max 50"), ylim=(0, 60)),
+        dict(title="Solver fault", axis="Fault (0 / 1)", dec=0, tick=1, lines=[("fault", "#8e44ad", "Fault")],
+             ylim=(-0.1, 1.1))]),
+]
+
 
 class NullSource:
-    """Offline mode: Test mode."""
-
     busy = False
 
     def __init__(self):
-        self.state = "IDLE"
-        self.connected = True      
+        self.state, self.connected = "IDLE", True
 
-    def set_mode(self, mode): pass
-    def set_ctrl(self, ctrl): pass
-    def set_dir(self, d): pass
-    def set_ref(self, ref): pass
+    set_mode = set_ctrl = set_dir = set_ref = lambda self, v: None
     def start(self): self.state = "RUNNING"
     def stop(self): self.state = "IDLE"
     def estop(self): self.state = "FAULT"
     def poll(self): return []
 
 
-class PiLink(QtCore.QObject):
-    """ssh connection to the Pi (paramiko, password login). On connect it starts the server
-    program on the Pi and talks to it with a small text protocol over the ssh channel.
-    Closing the channel, or losing the link, makes the Pi disable the motor."""
-
-    message = QtCore.Signal(str)
-    changed = QtCore.Signal()              
+class PiLink(QC.QObject):
+    message = QC.Signal(str)
+    changed = QC.Signal()
     T_FIELDS = [f for f in FIELDS if f != "total_us"]
 
     def __init__(self, server_command=PI_SERVER_COMMAND):
         super().__init__()
         self._server_command = server_command
-        self._busy = False                 
-        self.connected = False             
-        self.state = "DISCONNECTED"
-        self._cfg = dict(mode="voltage", ctrl="position", dir=1, ref=dict(type="step", value=3.0))
+        self.busy, self.connected, self.state = False, False, "DISCONNECTED"
+        self._cfg = dict(mode="voltage", ctrl="position", dir=1, ref=dict(type="step", value=3.0, t0=1.0, preview=True))
         self._lock = threading.Lock()
-        self._samples = []
-        self._chan = None
-        self._closing = False
-        self._thread = None
-
-    @property
-    def busy(self):
-        return self._busy
+        self._samples, self._chan, self._closing, self._thread = [], None, False, None
 
     def connect_to(self, address, password):
-        if self._busy:
+        if self.busy:
             return
         if paramiko is None:
             self.message.emit("The ssh library is missing. Install it with: pip install paramiko")
             return
-        self._busy, self._closing = True, False
+        self.busy, self._closing = True, False
         self.changed.emit()
         self._thread = threading.Thread(target=self._worker, args=(address, password), daemon=True)
         self._thread.start()
@@ -112,14 +110,14 @@ class PiLink(QtCore.QObject):
             self.message.emit(f"Connecting to {host} ...")
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            client.connect(host, port=port, username=user, password=password, timeout=8,
-                           banner_timeout=8, auth_timeout=8, look_for_keys=False, allow_agent=False)
+            client.connect(host, port=port, username=user, password=password, timeout=8, banner_timeout=8,
+                           auth_timeout=8, look_for_keys=False, allow_agent=False)
             client.get_transport().set_keepalive(2)
             chan = client.get_transport().open_session()
             chan.exec_command(self._server_command)
             self._chan = chan
             if self._server_command.startswith("sudo"):
-                chan.sendall((password + "\n").encode())       
+                chan.sendall((password + "\n").encode())
             password = None
             why = self._session(chan)
         except paramiko.AuthenticationException:
@@ -134,10 +132,7 @@ class PiLink(QtCore.QObject):
                     client.close()
             except Exception:
                 pass
-            self._chan = None
-            self.connected = False
-            self.state = "DISCONNECTED"
-            self._busy = False
+            self._chan, self.connected, self.state, self.busy = None, False, "DISCONNECTED", False
             self.message.emit(why or "Disconnected")
             self.changed.emit()
 
@@ -189,8 +184,7 @@ class PiLink(QtCore.QObject):
         elif line.startswith("H "):
             with self._lock:
                 self._samples.clear()
-            self.connected = True
-            self.state = "IDLE"
+            self.connected, self.state = True, "IDLE"
             self.message.emit("Connected")
             self.changed.emit()
         elif line.startswith("E "):
@@ -201,13 +195,12 @@ class PiLink(QtCore.QObject):
         self._send("STOP")
         try:
             if self._chan is not None:
-                self._chan.shutdown_write()        
+                self._chan.shutdown_write()
         except Exception:
             pass
 
     def shutdown(self):
-        """Blocking variant, used when the window closes."""
-        if self._busy:
+        if self.busy:
             self.disconnect_from()
             if self._thread is not None:
                 self._thread.join(4.0)
@@ -229,22 +222,20 @@ class PiLink(QtCore.QObject):
 
     def set_mode(self, mode): self._cfg["mode"] = mode
     def set_ctrl(self, ctrl): self._cfg["ctrl"] = ctrl
-    def set_dir(self, d):     self._cfg["dir"] = -1 if d > 0 else 1
-    def set_ref(self, ref):   self._cfg["ref"] = dict(ref)
+    def set_dir(self, d): self._cfg["dir"] = -1 if d > 0 else 1
+    def set_ref(self, ref): self._cfg["ref"] = dict(ref)
 
     def start(self):
         c, r = self._cfg, self._cfg["ref"]
         self._send(f"CFG mode={c['mode']} ctrl={c['ctrl']} dir={c['dir']} ref={r['type']} "
-                   f"value={r['value']:.6g}")
+                   f"value={r['value']:.6g} t0={r['t0']:.6g} preview={1 if r['preview'] else 0}")
         self._send("START")
 
-    def stop(self):  self._send("STOP")
+    def stop(self): self._send("STOP")
     def estop(self): self._send("ESTOP")
 
 
 class FixedAxis(pg.AxisItem):
-    """Axis with a fixed number of decimals and no SI prefix scaling."""
-
     def __init__(self, orientation, decimals=DECIMALS, **kw):
         super().__init__(orientation, **kw)
         self.decimals = decimals
@@ -254,24 +245,19 @@ class FixedAxis(pg.AxisItem):
         return [f"{v * scale:.{self.decimals}f}" for v in values]
 
 
-class MainWindow(QtWidgets.QMainWindow):
+class MainWindow(QW.QMainWindow):
     def __init__(self, source):
         super().__init__()
-        self.src = source
-        self._was_connected = False
+        self.src, self._was_connected, self.paused = source, False, False
         self.setWindowTitle("MPC control DC motor (Demonstrator app)")
         self.buf = {k: collections.deque(maxlen=int(WINDOW_S / SAMPLE_DT) + 50) for k in FIELDS}
-        self.ref_curves = {}        
-        self.hidden_fields = set()
-        self.legends = []           
-        self.u_plot = None          
-       
+        self.ref_curves, self.hidden_fields, self.legends, self.u_plot = {}, set(), [], None
         self.rec, self.recording, self.rec_dirty = [], False, False
         self._last_dir = os.path.expanduser("~")
 
-        central = QtWidgets.QWidget()
+        central = QW.QWidget()
         self.setCentralWidget(central)
-        root = QtWidgets.QHBoxLayout(central)
+        root = QW.QHBoxLayout(central)
         root.addWidget(self._build_controls(), 0)
         root.addWidget(self._build_plots(), 1)
         if hasattr(self.src, "message"):
@@ -281,51 +267,60 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.statusBar().showMessage("Offline mode")
 
-        self.timer = QtCore.QTimer(self)
+        self.timer = QC.QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(30)
         self._on_mode()
         self._on_ctrl()
         self._update_rec_ui()
 
-    def _row(self, form, label, widget, tip):
-        lbl = QtWidgets.QLabel(label)
-        lbl.setToolTip(tip)
-        widget.setToolTip(tip)
-        form.addRow(lbl, widget)
+    @staticmethod
+    def _row(form, label, w, tip):
+        l = QW.QLabel(label)
+        l.setToolTip(tip)
+        w.setToolTip(tip)
+        form.addRow(l, w)
+
+    @staticmethod
+    def _spin(val, lo, hi, suffix):
+        s = QW.QDoubleSpinBox()
+        s.setRange(lo, hi)
+        s.setValue(val)
+        s.setSuffix(suffix)
+        s.setDecimals(DECIMALS)
+        return s
 
     def _build_controls(self):
-        panel = QtWidgets.QWidget()
+        panel = QW.QWidget()
         panel.setFixedWidth(280)
-        lay = QtWidgets.QVBoxLayout(panel)
+        lay = QW.QVBoxLayout(panel)
 
-        g = QtWidgets.QGroupBox("Connection")
-        f = QtWidgets.QFormLayout(g)
-        self.ip = QtWidgets.QLineEdit("pi@clt-lab-t-5086")
-        self.conn_btn = QtWidgets.QPushButton("Connect")
+        g = QW.QGroupBox("Connection")
+        f = QW.QFormLayout(g)
+        self.ip = QW.QLineEdit("pi@clt-lab-t-5086")
+        self.conn_btn = QW.QPushButton("Connect")
         self.conn_btn.clicked.connect(self.on_connect)
-        self._row(f, "Pi address", self.ip,
-                  "Address of the Raspberry Pi")
         self.conn_btn.setToolTip("Log in to the Pi and start the controller program there")
+        self._row(f, "Pi address", self.ip, "Address of the Raspberry Pi")
         f.addRow(self.conn_btn)
         lay.addWidget(g)
 
-        g = QtWidgets.QGroupBox("Controller")
-        f = QtWidgets.QFormLayout(g)
-        self.ctrl = QtWidgets.QComboBox()
+        g = QW.QGroupBox("Controller")
+        f = QW.QFormLayout(g)
+        self.ctrl, self.mode, self.ref_type = QW.QComboBox(), QW.QComboBox(), QW.QComboBox()
         self.ctrl.addItems(["Position", "Speed"])
-        self.mode = QtWidgets.QComboBox()
         self.mode.addItems(["Voltage", "Current"])
-        self.ref_type = QtWidgets.QComboBox()
         self.ref_type.addItems(["Step", "Cycle"])
-        self.value = self._spin(6.28, 0, 60*math.pi, " rad")
+        self.value = self._spin(6.28, 0, PREVIEW_MAX_RAD, " rad")
+        self.t0 = self._spin(1.0, 0, 60, " s")
+        self.preview = QW.QCheckBox("Use preview")
+        self.preview.setChecked(True)
 
-        self.cw_btn = QtWidgets.QPushButton("CW")
-        self.ccw_btn = QtWidgets.QPushButton("CCW")
-        self.dir_group = QtWidgets.QButtonGroup(self)
+        self.cw_btn, self.ccw_btn = QW.QPushButton("CW"), QW.QPushButton("CCW")
+        self.dir_group = QW.QButtonGroup(self)
         self.dir_group.setExclusive(True)
-        dir_box = QtWidgets.QWidget()
-        h = QtWidgets.QHBoxLayout(dir_box)
+        dir_box = QW.QWidget()
+        h = QW.QHBoxLayout(dir_box)
         h.setContentsMargins(0, 0, 0, 0)
         for b, tip in ((self.cw_btn, "Rotate clockwise (positive reference)"),
                        (self.ccw_btn, "Rotate counter-clockwise (negative reference)")):
@@ -336,111 +331,80 @@ class MainWindow(QtWidgets.QMainWindow):
             h.addWidget(b)
         self.cw_btn.setChecked(True)
 
-        self.ref_type.currentIndexChanged.connect(self._on_ref_type)
+        self.ref_type.currentIndexChanged.connect(self._update_enabled)
         self.ctrl.currentIndexChanged.connect(self._on_ctrl)
         self.mode.currentIndexChanged.connect(self._on_mode)
+        self.preview.toggled.connect(self._on_preview)
 
-        self._row(f, "Control strategy", self.ctrl,
-                  "Motor position (rad) or motor speed (rad/s).")
-        self._row(f, "MPC mode", self.mode,
-                  "MPC mode: direct voltage or current reference.")
+        self._row(f, "Control strategy", self.ctrl, "Motor position (rad) or motor speed (rad/s).")
+        self._row(f, "MPC mode", self.mode, "MPC mode: direct voltage or current reference.")
         self._row(f, "Direction", dir_box, "Sense of rotation.")
         self._row(f, "Reference", self.ref_type,
-                  "Step: constant reference.\n"
-                  "Cycle: 10 turns, hold 2 s, back to 0.\n"
+                  "Step: move to a constant target.\nCycle: raw step to 10 turns, hold 2 s, back to 0.\n"
                   "Speed control only supports Step.")
         self._row(f, "Step value", self.value,
-                  "Magnitude of the step reference.\n"
-                  "Position steps are limited to 30 turns (188.496 rad).")
+                  "Magnitude of the step reference.\nWithout preview, position steps are limited to 30 turns "
+                  "(188.496 rad).\nWith preview the value is not limited.")
+        self._row(f, "Start time", self.t0, "Delay between pressing Start and the beginning of the reference move.")
+        self._row(f, "Preview", self.preview,
+                  "On: the MPC sees the next 20 samples of the planned trajectory.\n"
+                  "Off: the MPC only sees the current reference value.\nPosition step only.")
         lay.addWidget(g)
 
-        self.start_btn = QtWidgets.QPushButton("Start")
-        self.stop_btn = QtWidgets.QPushButton("Stop")
-        self.estop_btn = QtWidgets.QPushButton("Emergency stop")
+        self.start_btn, self.stop_btn = QW.QPushButton("Start"), QW.QPushButton("Stop")
+        self.estop_btn = QW.QPushButton("Emergency stop")
         self.estop_btn.setStyleSheet("QPushButton{background:#c0392b;color:white;font-weight:bold;padding:10px}")
         self.start_btn.setToolTip("Start the controller")
         self.stop_btn.setToolTip("Stop the controller smoothly (back to Idle)")
         self.estop_btn.setToolTip("Immediately cut the motor command (state Fault)")
         self.start_btn.clicked.connect(self.on_start)
-        self.stop_btn.clicked.connect(self.on_stop)
-        self.estop_btn.clicked.connect(self.on_estop)
+        self.stop_btn.clicked.connect(lambda: (self.src.stop(), self._update_enabled()))
+        self.estop_btn.clicked.connect(lambda: (self.src.estop(), self._update_enabled()))
         for b in (self.start_btn, self.stop_btn, self.estop_btn):
             lay.addWidget(b)
 
-        self.state_lbl = QtWidgets.QLabel("State: Disconnected")
+        self.pause_btn = QW.QPushButton("Pause plots")
+        self.pause_btn.setCheckable(True)
+        self.pause_btn.setToolTip("Freeze the plots so you can zoom and inspect them.\nData keeps being received and recorded.")
+        self.pause_btn.setStyleSheet("QPushButton:checked{background:#f39c12;color:white;font-weight:bold}")
+        self.pause_btn.toggled.connect(self.on_pause)
+        lay.addWidget(self.pause_btn)
+
+        self.state_lbl = QW.QLabel("State: Disconnected")
         self.state_lbl.setStyleSheet("font-size:16px;font-weight:bold")
-        #self.state_lbl.setToolTip("Controller state reported by the Pi: Idle, Running or Fault")
         lay.addWidget(self.state_lbl)
 
-        g = QtWidgets.QGroupBox("Data logging")
-        v = QtWidgets.QVBoxLayout(g)
-        self.rec_btn = QtWidgets.QPushButton("Record")
+        g = QW.QGroupBox("Data logging")
+        v = QW.QVBoxLayout(g)
+        self.rec_btn, self.save_btn = QW.QPushButton("Record"), QW.QPushButton("Save CSV...")
         self.rec_btn.setToolTip("Start / stop recording")
-        self.rec_btn.clicked.connect(self.on_record)
-        self.save_btn = QtWidgets.QPushButton("Save CSV...")
         self.save_btn.setToolTip("Choose where to save the recording on this computer")
+        self.rec_btn.clicked.connect(self.on_record)
         self.save_btn.clicked.connect(self.on_save_csv)
-        self.rec_lbl = QtWidgets.QLabel("No recording")
-        v.addWidget(self.rec_btn)
-        v.addWidget(self.save_btn)
-        v.addWidget(self.rec_lbl)
+        self.rec_lbl = QW.QLabel("No recording")
+        for w in (self.rec_btn, self.save_btn, self.rec_lbl):
+            v.addWidget(w)
         lay.addWidget(g)
         lay.addStretch(1)
         return panel
 
-    def _spin(self, val, lo, hi, suffix):
-        s = QtWidgets.QDoubleSpinBox()
-        s.setRange(lo, hi)
-        s.setValue(val)
-        s.setSuffix(suffix)
-        s.setDecimals(DECIMALS)
-        return s
-
-    @staticmethod
-    def _tab_specs():
-        return [
-            ("Motion", [
-                dict(title="Position", axis="Position (rad)",
-                     lines=[("pos_ref", "#e67e22", "Ref"), ("pos", "#1f77b4", "Measured")]),
-                dict(title="Velocity", axis="Velocity (rad/s)",
-                     lines=[("vel_ref", "#e67e22", "Ref"), ("vel", "#1f77b4", "Measured")]),
-            ]),
-            ("Current / Voltage", [
-                dict(title="Current", axis="Current (A)", lines=[("i_q", "#9b59b6", "Current")]),
-                dict(title="Controller output", axis="Voltage (V)", lines=[("u", "#2ca02c", "Command")],
-                     is_output=True),
-            ]),
-            ("Timing", [
-                dict(title="Computation time", axis="Time (µs)",
-                     lines=[("mpc_us", "#1f77b4", "MPC solve"), ("spi_us", "#e67e22", "SPI")]),
-                dict(title="Total (MPC + SPI)", axis="Time (µs)",
-                     lines=[("total_us", "k", "Total")],
-                     limit=(1000, "1 ms limit"), ylim=(0, 1200)),
-            ]),
-            ("Solver", [
-                dict(title="MPC iterations", axis="Iterations",
-                     lines=[("mpc_iter", "#1f77b4", "Iterations")],
-                     limit=(50, "Max 50"), ylim=(0, 60)),
-                dict(title="Solver fault", axis="Fault (0 / 1)",
-                     lines=[("fault", "#8e44ad", "Fault")], ylim=(-0.1, 1.1)),
-            ]),
-        ]
-
     def _build_plots(self):
         pg.setConfigOptions(antialias=True, background="w", foreground="k")
         self.curves, self.first_plot = [], None
-        tabs = QtWidgets.QTabWidget()
-        for name, specs in self._tab_specs():
+        tabs = QW.QTabWidget()
+        for name, specs in TABS:
             tabs.addTab(self._make_tab(specs), name)
         return tabs
 
     def _make_tab(self, specs):
         w = pg.GraphicsLayoutWidget()
-        w.ci.layout.setColumnFixedWidth(1, LEGEND_W)      
+        w.ci.layout.setColumnFixedWidth(1, LEGEND_W)
         for row, sp in enumerate(specs):
             p = w.addPlot(row=row, col=0, title=sp["title"],
-                          axisItems={"left": FixedAxis("left"), "bottom": FixedAxis("bottom")})
+                          axisItems={"left": FixedAxis("left", sp.get("dec", DECIMALS)), "bottom": FixedAxis("bottom")})
             p.getAxis("left").setWidth(AXIS_W)
+            if "tick" in sp:
+                p.getAxis("left").setTickSpacing(sp["tick"], sp["tick"])
             p.setLabel("left", sp["axis"])
             p.showGrid(x=True, y=True, alpha=0.3)
             if sp.get("is_output"):
@@ -453,7 +417,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 p.setLabel("bottom", "Time (s)")
             if "ylim" in sp:
                 p.setYRange(*sp["ylim"], padding=0)
-
             legend = pg.LegendItem()
             legend.setParentItem(p.graphicsItem())
             legend.anchor(itemPos=(0, 0), parentPos=(1, 0), offset=(8, 30))
@@ -466,13 +429,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ref_curves[field] = c
             self.legends.append((legend, entries))
             self._rebuild_legend(legend, entries)
-
             if "limit" in sp:
                 val, label = sp["limit"]
-                p.addItem(pg.InfiniteLine(
-                    pos=val, angle=0, label=label,
-                    pen=pg.mkPen("r", width=2, style=QtCore.Qt.DashLine),
-                    labelOpts={"position": 0.95, "color": "r"}))
+                p.addItem(pg.InfiniteLine(pos=val, angle=0, label=label,
+                                          pen=pg.mkPen("r", width=2, style=QC.Qt.DashLine),
+                                          labelOpts={"position": 0.95, "color": "r"}))
         return w
 
     def _rebuild_legend(self, legend, entries):
@@ -482,28 +443,29 @@ class MainWindow(QtWidgets.QMainWindow):
             if field not in self.hidden_fields:
                 legend.addItem(c, name)
 
-    def _direction(self):
-        return 1 if self.cw_btn.isChecked() else -1
-
     def _is_speed(self):
         return self.ctrl.currentText() == "Speed"
 
     def _on_mode(self):
-        current = self.mode.currentText() == "Current"
+        cur = self.mode.currentText() == "Current"
         if self.u_plot is not None:
-            self.u_plot.setTitle("Controller output (current)" if current else "Controller output (voltage)")
-            self.u_plot.setLabel("left", "Current (A)" if current else "Voltage (V)")
+            self.u_plot.setTitle("Controller output (current)" if cur else "Controller output (voltage)")
+            self.u_plot.setLabel("left", "Current (A)" if cur else "Voltage (V)")
 
-    def _on_ref_type(self):
+    def _update_value_limit(self):
+        speed = self._is_speed()
+        self.value.setSuffix(" rad/s" if speed else " rad")
+        self.value.setMaximum(SPEED_MAX if speed else PREVIEW_MAX_RAD if self.preview.isChecked() else MAX_STEP_RAD)
+
+    def _on_preview(self):
+        self._update_value_limit()
         self._update_enabled()
 
     def _on_ctrl(self):
         speed = self._is_speed()
         if speed:
             self.ref_type.setCurrentText("Step")
-        self.value.setSuffix(" rad/s" if speed else " rad")
-        self.value.setMaximum(10000 if speed else MAX_STEP_REV * 2 * math.pi)  
-
+        self._update_value_limit()
         self.hidden_fields = {"pos_ref"} if speed else {"vel_ref"}
         for field, curve in self.ref_curves.items():
             curve.setVisible(field not in self.hidden_fields)
@@ -513,17 +475,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_enabled(self):
         running = self.src.state == "RUNNING"
-        speed = self._is_speed()
-        cycle = self.ref_type.currentText() == "Cycle"
-        self.mode.setEnabled(not running)
-        self.ctrl.setEnabled(not running)
-        self.cw_btn.setEnabled(not running)
-        self.ccw_btn.setEnabled(not running)
-        connected = getattr(self.src, "connected", False)
+        speed, cycle = self._is_speed(), self.ref_type.currentText() == "Cycle"
+        connected, busy = getattr(self.src, "connected", False), getattr(self.src, "busy", False)
+        for w in (self.mode, self.ctrl, self.cw_btn, self.ccw_btn, self.t0):
+            w.setEnabled(not running)
         self.start_btn.setEnabled(not running and connected)
         self.stop_btn.setEnabled(connected)
         self.estop_btn.setEnabled(connected)
-        busy = getattr(self.src, "busy", False)
         self.ip.setEnabled(not busy)
         if busy and not connected:
             self.conn_btn.setText("Connecting...")
@@ -531,53 +489,46 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.conn_btn.setText("Disconnect" if busy else "Connect")
             self.conn_btn.setEnabled(hasattr(self.src, "connect_to"))
-        # reference widgets
         self.ref_type.setEnabled(not running and not speed)
         self.value.setEnabled(not cycle)
+        self.preview.setEnabled(not running and not speed and not cycle)
 
-    def _ref_dict(self):
-        return dict(type=self.ref_type.currentText().lower(), value=self.value.value())
-
-    # ---- connection
     def on_connect(self):
         if self.src.busy:
             self.src.disconnect_from()
             return
         address = self.ip.text().strip()
-        pwd, ok = QtWidgets.QInputDialog.getText(
-            self, "Connect to the Pi", f"Password for {address}:", QtWidgets.QLineEdit.Password)
+        pwd, ok = QW.QInputDialog.getText(self, "Connect to the Pi", f"Password for {address}:", QW.QLineEdit.Password)
         if ok and pwd:
             self.src.connect_to(address, pwd)
 
     def _on_link_changed(self):
         c = self.src.connected
         if c and not self._was_connected:
-            self._clear_buffers()          
+            for k in FIELDS:
+                self.buf[k].clear()
+            for _, curve in self.curves:
+                curve.setData([], [])
         self._was_connected = c
         self._update_enabled()
 
-    def _clear_buffers(self):
-        for k in FIELDS:
-            self.buf[k].clear()
-        for _, curve in self.curves:
-            curve.setData([], [])
-
-    # ---- run control
     def on_start(self):
         self.src.set_mode(self.mode.currentText().lower())
         self.src.set_ctrl(self.ctrl.currentText().lower())
-        self.src.set_dir(self._direction())
-        self.src.set_ref(self._ref_dict())
+        self.src.set_dir(1 if self.cw_btn.isChecked() else -1)
+        self.src.set_ref(dict(type=self.ref_type.currentText().lower(), value=self.value.value(),
+                              t0=self.t0.value(), preview=self.preview.isChecked()))
         self.src.start()
         self._update_enabled()
 
-    def on_stop(self):
-        self.src.stop()
-        self._update_enabled()
-
-    def on_estop(self):
-        self.src.estop()
-        self._update_enabled()
+    def on_pause(self, checked):
+        self.paused = checked
+        self.pause_btn.setText("Resume plots" if checked else "Pause plots")
+        if checked:
+            self.statusBar().showMessage("Plots paused (data is still being received and recorded)")
+        else:
+            self._refresh_plots()
+            self.statusBar().clearMessage()
 
     def _update_rec_ui(self):
         self.rec_btn.setText("Stop recording" if self.recording else "Record")
@@ -592,9 +543,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.recording = False
         else:
             if self.rec and self.rec_dirty:
-                ans = QtWidgets.QMessageBox.question(
-                    self, "Record", "The previous recording has not been saved.\nDiscard it and start a new one?")
-                if ans != QtWidgets.QMessageBox.Yes:
+                ans = QW.QMessageBox.question(self, "Record",
+                                              "The previous recording has not been saved.\nDiscard it and start a new one?")
+                if ans != QW.QMessageBox.Yes:
                     return
             self.rec, self.rec_dirty, self.recording = [], False, True
         self._update_rec_ui()
@@ -603,8 +554,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.rec:
             return
         default = os.path.join(self._last_dir, datetime.now().strftime("MPC_run_%Y-%m-%d_%H-%M-%S.csv"))
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save recording as CSV", default, "CSV files (*.csv);;All files (*)")
+        path, _ = QW.QFileDialog.getSaveFileName(self, "Save recording as CSV", default, "CSV files (*.csv);;All files (*)")
         if not path:
             return
         if not os.path.splitext(path)[1]:
@@ -617,7 +567,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 for r in rows:
                     w.writerow(["NaN" if v != v else f"{v:.9g}" for v in r])
         except OSError as e:
-            QtWidgets.QMessageBox.critical(self, "Save failed", f"The file could not be written:\n{e}")
+            QW.QMessageBox.critical(self, "Save failed", f"The file could not be written:\n{e}")
             return
         self.rec_dirty = False
         self._last_dir = os.path.dirname(path) or self._last_dir
@@ -625,14 +575,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         if self.rec and self.rec_dirty:
-            ans = QtWidgets.QMessageBox.question(
-                self, "Close", "The recording has not been saved.\nClose the application anyway?")
-            if ans != QtWidgets.QMessageBox.Yes:
+            ans = QW.QMessageBox.question(self, "Close", "The recording has not been saved.\nClose the application anyway?")
+            if ans != QW.QMessageBox.Yes:
                 event.ignore()
                 return
         if hasattr(self.src, "shutdown"):
             self.src.shutdown()
         super().closeEvent(event)
+
+    def _refresh_plots(self):
+        t = list(self.buf["t"])
+        if not t:
+            return
+        for field, curve in self.curves:
+            curve.setData(t, list(self.buf[field]))
+        self.first_plot.setXRange(t[-1] - WINDOW_S, t[-1], padding=0)
 
     def tick(self):
         new = False
@@ -644,24 +601,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.rec.append([s[k] for k in FIELDS])
                 self.rec_dirty = True
             new = True
-
         self.state_lbl.setText(f"State: {self.src.state.capitalize()}")
         self._update_enabled()
         if self.recording:
             self._update_rec_ui()
-
-        if not new:
-            return
-        t = list(self.buf["t"])
-        for field, curve in self.curves:
-            curve.setData(t, list(self.buf[field]))
-        self.first_plot.setXRange(t[-1] - WINDOW_S, t[-1], padding=0)
+        if new and not self.paused:
+            self._refresh_plots()
 
 
 def main():
-    app = QtWidgets.QApplication(sys.argv)
-    source = NullSource() if "--offline" in sys.argv else PiLink()
-    win = MainWindow(source)
+    app = QW.QApplication(sys.argv)
+    win = MainWindow(NullSource() if "--offline" in sys.argv else PiLink())
     win.resize(1100, 650)
     win.show()
     sys.exit(app.exec())
@@ -669,6 +619,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 
