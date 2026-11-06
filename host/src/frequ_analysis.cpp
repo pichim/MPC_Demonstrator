@@ -1,14 +1,15 @@
 #define SPI_SPEED_HZ 30000000
 #define PERIOD_US 1000
-#define MODE 1                 
+#define MODE 0                 
 #define CURRENT_LIMIT_A 1.7
 #define VOLTAGE_LIMIT_V 24.0
 
 // Chirp settings
-#define CHIRP_F0_HZ 5.0  
-#define CHIRP_F1_HZ 150.0
+#define CHIRP_F0_HZ 1.0  
+#define CHIRP_F1_HZ 500.0
 #define CHIRP_DURATION_S 30.0
 #define CHIRP_AMPLITUDE_V 0.05 //0.05 max if mode = current ref
+#define CHIRP_OFFSET_V 0.0
 
 #define Trun (CHIRP_DURATION_S + PERIOD_US * 1e-6)
 #define PRINT_EVERY 1
@@ -30,12 +31,14 @@
 #include "spi_nss.h"
 #include "chirp.hpp"
 
+#define CHIRP_ABS_OFFSET_V (CHIRP_OFFSET_V < 0.0 ? -(CHIRP_OFFSET_V) : (CHIRP_OFFSET_V))
+
 #if MODE == 0
-static_assert(CHIRP_AMPLITUDE_V <= CURRENT_LIMIT_A,
-              "Chirp amplitude exceeds current command limit in current mode");
+static_assert(CHIRP_AMPLITUDE_V + CHIRP_ABS_OFFSET_V <= CURRENT_LIMIT_A,
+              "Chirp amplitude plus offset exceeds current command limit in current mode");
 #else
-static_assert(CHIRP_AMPLITUDE_V <= VOLTAGE_LIMIT_V,
-              "Chirp amplitude exceeds voltage command limit");
+static_assert(CHIRP_AMPLITUDE_V + CHIRP_ABS_OFFSET_V <= VOLTAGE_LIMIT_V,
+              "Chirp amplitude plus offset exceeds voltage command limit");
 #endif
 
 namespace {
@@ -125,7 +128,7 @@ void run(NssSPI &spi, Log &log)
         double chirp_frequency = 0.0;
         if (enabled) {
             if (chirp.update()) {
-                chirp_voltage = CHIRP_AMPLITUDE_V * chirp.getExc();
+                chirp_voltage = CHIRP_AMPLITUDE_V * chirp.getExc() + CHIRP_OFFSET_V;
                 chirp_frequency = chirp.getFreq();
             }
         }
@@ -281,3 +284,4 @@ int main(int argc, char **)
         return 1;
     }
 }
+
