@@ -300,7 +300,7 @@ class MainWindow(QW.QMainWindow):
         self.ip = QW.QLineEdit("pi@clt-lab-t-5086")
         self.conn_btn = QW.QPushButton("Connect")
         self.conn_btn.clicked.connect(self.on_connect)
-        self.conn_btn.setToolTip("Log in to the Pi and start the controller program there")
+        self.conn_btn.setToolTip("Connect to the Raspberry Pi")
         self._row(f, "Pi address", self.ip, "Address of the Raspberry Pi")
         f.addRow(self.conn_btn)
         lay.addWidget(g)
@@ -314,7 +314,7 @@ class MainWindow(QW.QMainWindow):
         self.value = self._spin(6.28, 0, PREVIEW_MAX_RAD, " rad")
         self.t0 = self._spin(1.0, 0, 60, " s")
         self.preview = QW.QCheckBox("Use preview")
-        self.preview.setChecked(True)
+        self.preview.setChecked(False)
 
         self.cw_btn, self.ccw_btn = QW.QPushButton("CW"), QW.QPushButton("CCW")
         self.dir_group = QW.QButtonGroup(self)
@@ -322,8 +322,8 @@ class MainWindow(QW.QMainWindow):
         dir_box = QW.QWidget()
         h = QW.QHBoxLayout(dir_box)
         h.setContentsMargins(0, 0, 0, 0)
-        for b, tip in ((self.cw_btn, "Rotate clockwise (positive reference)"),
-                       (self.ccw_btn, "Rotate counter-clockwise (negative reference)")):
+        for b, tip in ((self.cw_btn, "Rotate clockwise"),
+                       (self.ccw_btn, "Rotate counter-clockwise")):
             b.setCheckable(True)
             b.setToolTip(tip)
             b.setStyleSheet("QPushButton:checked{background:#2980b9;color:white;font-weight:bold}")
@@ -336,19 +336,19 @@ class MainWindow(QW.QMainWindow):
         self.mode.currentIndexChanged.connect(self._on_mode)
         self.preview.toggled.connect(self._on_preview)
 
-        self._row(f, "Control strategy", self.ctrl, "Motor position (rad) or motor speed (rad/s).")
-        self._row(f, "MPC mode", self.mode, "MPC mode: direct voltage or current reference.")
-        self._row(f, "Direction", dir_box, "Sense of rotation.")
+        self._row(f, "Control strategy", self.ctrl, "Motor position (rad) or motor speed (rad/s)")
+        self._row(f, "MPC mode", self.mode, "MPC mode: direct voltage or current reference")
+        self._row(f, "Direction", dir_box, "Sense of rotation")
         self._row(f, "Reference", self.ref_type,
-                  "Step: move to a constant target.\nCycle: raw step to 10 turns, hold 2 s, back to 0.\n"
-                  "Speed control only supports Step.")
+                  "Step: step response\nCycle: step to 10 turns, hold 2 s, back to 0\n"
+                  "Speed control only supports Step")
         self._row(f, "Step value", self.value,
-                  "Magnitude of the step reference.\nWithout preview, position steps are limited to 30 turns "
-                  "(188.496 rad).\nWith preview the value is not limited.")
-        self._row(f, "Start time", self.t0, "Delay between pressing Start and the beginning of the reference move.")
+                  "Magnitude of the step reference\nWithout preview, position steps are limited to 30 turns "
+                  "(188.496 rad)\nWith preview the value is not limited")
+        self._row(f, "Start time", self.t0, "Delay between pressing Start and the beginning of the step")
         self._row(f, "Preview", self.preview,
-                  "On: the MPC sees the next 20 samples of the planned trajectory.\n"
-                  "Off: the MPC only sees the current reference value.\nPosition step only.")
+                  "Follows an s-shape trajectory"
+                  "\nAvailable in Position mode only")
         lay.addWidget(g)
 
         self.start_btn, self.stop_btn = QW.QPushButton("Start"), QW.QPushButton("Stop")
@@ -356,7 +356,7 @@ class MainWindow(QW.QMainWindow):
         self.estop_btn.setStyleSheet("QPushButton{background:#c0392b;color:white;font-weight:bold;padding:10px}")
         self.start_btn.setToolTip("Start the controller")
         self.stop_btn.setToolTip("Stop the controller smoothly (back to Idle)")
-        self.estop_btn.setToolTip("Immediately cut the motor command (state Fault)")
+        self.estop_btn.setToolTip("Immediately stops the motor (state Fault)")
         self.start_btn.clicked.connect(self.on_start)
         self.stop_btn.clicked.connect(lambda: (self.src.stop(), self._update_enabled()))
         self.estop_btn.clicked.connect(lambda: (self.src.estop(), self._update_enabled()))
@@ -365,7 +365,7 @@ class MainWindow(QW.QMainWindow):
 
         self.pause_btn = QW.QPushButton("Pause plots")
         self.pause_btn.setCheckable(True)
-        self.pause_btn.setToolTip("Freeze the plots so you can zoom and inspect them.\nData keeps being received and recorded.")
+        self.pause_btn.setToolTip("Freeze the plots")
         self.pause_btn.setStyleSheet("QPushButton:checked{background:#f39c12;color:white;font-weight:bold}")
         self.pause_btn.toggled.connect(self.on_pause)
         lay.addWidget(self.pause_btn)
@@ -377,7 +377,7 @@ class MainWindow(QW.QMainWindow):
         g = QW.QGroupBox("Data logging")
         v = QW.QVBoxLayout(g)
         self.rec_btn, self.save_btn = QW.QPushButton("Record"), QW.QPushButton("Save CSV...")
-        self.rec_btn.setToolTip("Start / stop recording")
+        self.rec_btn.setToolTip("Start / Stop recording")
         self.save_btn.setToolTip("Choose where to save the recording on this computer")
         self.rec_btn.clicked.connect(self.on_record)
         self.save_btn.clicked.connect(self.on_save_csv)
@@ -525,7 +525,7 @@ class MainWindow(QW.QMainWindow):
         self.paused = checked
         self.pause_btn.setText("Resume plots" if checked else "Pause plots")
         if checked:
-            self.statusBar().showMessage("Plots paused (data is still being received and recorded)")
+            self.statusBar().showMessage("Plotting paused")
         else:
             self._refresh_plots()
             self.statusBar().clearMessage()
