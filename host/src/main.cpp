@@ -3,7 +3,7 @@
 #define SPI_SPEED_HZ 30000000
 #define PERIOD_US 1000
 #define SETPOINT 0.08f        // A in current mode, V in voltage mode.
-#define MODE 1                // 0: current setpoint, 1: direct voltage.
+#define MODE 0                // 0: current setpoint, 1: direct voltage.
 #define CURRENT_LIMIT_A 1.7f  // Host current-command limit; keep aligned with Python host.
 #define VOLTAGE_LIMIT_V 24.0f // MCU supply minus compensation; keep aligned with config.h.
 #define Trun 10.0              // Nominal seconds; converted to a rounded integer cycle count.
