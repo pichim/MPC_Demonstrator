@@ -6,9 +6,9 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-add_executable(mpc_spi src/main.cpp)
+#add_executable(mpc_spi src/main.cpp)
 #add_executable(mpc_spi src/frequ_analysis.cpp)
-#add_executable(mpc_spi src/mpc_app.cpp)
+add_executable(mpc_spi src/mpc_app.cpp)
 target_include_directories(mpc_spi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/MPCcontroller
     ${CMAKE_CURRENT_SOURCE_DIR}/chirp

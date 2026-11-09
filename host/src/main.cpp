@@ -153,6 +153,14 @@ void run(NssSPI &spi, Log &log)
     Eigen::MatrixXd Caug   = loadMatrixCSV(matDir + "/Caug.csv").cast<double>();
     Eigen::MatrixXd Lgain  = loadMatrixCSV(matDir + "/Lgain.csv").cast<double>();
     CsvTable meta = loadCsvTable(matDir + "/meta.csv");
+    std::cout << "Metadata file: " << matDir << "/meta.csv\n";
+
+    for (size_t i = 0; i < meta.header.size(); ++i) {
+        std::cout << "Header[" << i << "] = [" << meta.header[i]
+                  << "], length = " << meta.header[i].size() << "\n";
+    }
+
+
     double umx = meta.rows[0][colIndex(meta, "umx")];
 
     Controller ctrl(H, Aineq, Fx, Fu0, Fd, Fr, Ex, Eu0, Ed, bconst, umx, Aaug, Baug, Caug, Lgain);
