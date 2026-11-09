@@ -40,7 +40,7 @@
 #define MPC_MOTOR_PWM_PERIOD_US 50                   // 20 kHz PWM
 
 #define MPC_POWERSUPPLY_VOLTAGE 24.0f // Voltage of the power supply in Volts
-#define MPC_OFFSET_VOLTAGE 0.0f       // Optional compensation in both modes; previously 2 V.
+#define MPC_OFFSET_VOLTAGE 2.0f       // Optional compensation in both modes; previously 2 V.
 
 #define MPC_KP_I 2.5f                  // Proportional gain current controller
 #define MPC_TN_I (0.0013f / 4.5320f)   // Integral time constant current controller (L / R)
@@ -56,5 +56,9 @@
 
 #define MPC_CURRENT_SETPOINT_F_CUT_HZ 500.0f // Second order low-pass filter cutoff frequency in Hz
 #define MPC_CURRENT_SETPOINT_DAMPING 0.9f    // Second order low-pass filter damping ratio
+
+//current anti aliasing filter
+#define MPC_CURRENT_AAF_F_CUT_HZ 300.0f
+#define MPC_CURRENT_AAF_DAMPING  0.7071f
 
 #endif /* MPC_CONFIG_H_ */

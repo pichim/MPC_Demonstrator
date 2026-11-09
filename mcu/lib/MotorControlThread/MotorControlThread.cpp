@@ -18,6 +18,7 @@ MotorControlThread::MotorControlThread(IO_handler &io, SpiSlaveDMA &spi, float T
     velocityNotch.notchInit(MPC_F_CUT_HZ_NOTCH, MPC_D_NOTCH, Ts);
 
     lowPass2CurrentSetpoint.lowPass2Init(MPC_CURRENT_SETPOINT_F_CUT_HZ, MPC_CURRENT_SETPOINT_DAMPING, Ts);
+    currentAntiAliasFilter.lowPass2Init(MPC_CURRENT_AAF_F_CUT_HZ, MPC_CURRENT_AAF_DAMPING, Ts);
 
     pidCntrl.setup(MPC_KP_I,
                    MPC_KI_I,
@@ -62,18 +63,23 @@ void MotorControlThread::loop(void)
     MotorCommand::Mode previous_mode = command.mode;
     float voltage = 0.0f; // Last applied voltage before optional compensation.
     const float voltage_limit = MPC_POWERSUPPLY_VOLTAGE - MPC_OFFSET_VOLTAGE;
+
+    currentAntiAliasFilter.reset(io_handler.read_current());
+
     while (true) {
         ThisThread::flags_wait_any(threadFlag);
         io_handler.set_enable_frtt_do(true);
 
         const float current = io_handler.read_current();
+        const float current_aaf = currentAntiAliasFilter.apply(current);
         const auto encoder = io_handler.read_encoder_motor();
         const float position = MPC_POSITION_NOTCH_ENABLED ? positionNotch.apply(encoder.position) : encoder.position;
-        const float velocity = velocityNotch.apply(encoder.velocity);
+        const float velocity = velocityNotch.apply(encoder.velocity);      
+
         // Sensors were sampled under the previously applied voltage. Publish a
         // coherent snapshot before computing the next output, not an ACK.
-        spi.setReplyData(voltage, current, position, velocity);
-
+        spi.setReplyData(voltage, current_aaf, position, velocity); 
+        
         SpiCommand received;
         if (spi.takeCommand(received))
             command.accept(received.data, received.received_at_us);
