@@ -153,8 +153,8 @@ void run(NssSPI &spi, Log &log)
     Eigen::MatrixXd Caug   = loadMatrixCSV(matDir + "/Caug.csv").cast<double>();
     Eigen::MatrixXd Lgain  = loadMatrixCSV(matDir + "/Lgain.csv").cast<double>();
     CsvTable meta = loadCsvTable(matDir + "/meta.csv");
-    //double umx = meta.rows[0][colIndex(meta, "umx")];
-    double umx = 1.5;
+    double umx = meta.rows[0][colIndex(meta, "umx")];
+
     Controller ctrl(H, Aineq, Fx, Fu0, Fd, Fr, Ex, Eu0, Ed, bconst, umx, Aaug, Baug, Caug, Lgain);
   
     double theta0 = 0.0;
