@@ -4,6 +4,7 @@
 #define VOLTAGE_LIMIT_V 24.0f
 #define TELEM_DECIM 10
 #define LINK_TIMEOUT_S 1.0
+#define USE_CSV_MATRICES 1
 
 #include <algorithm>
 #include <atomic>
@@ -30,6 +31,8 @@
 #include "mpc_solver_iRef.hpp"
 #include "csv_utils.hpp"
 #include "pathPlanner.hpp"
+#include "matrices_prep.hpp"
+#include "matrices_prep_curr.hpp"
 #include <Eigen/Dense>
 
 namespace {
@@ -49,9 +52,12 @@ struct Config {
     bool speed_ctrl = false;
     int direction = 1;
     bool cycle = false;
-    bool preview = false;  
+    bool preview = false;
     double value = 3.0;
     double t0 = 1.0;
+    bool use_csv = (USE_CSV_MATRICES != 0);
+    mpc_prep::Params params;
+    mpc_prep_curr::Params params_curr;
 };
 
 enum class Cmd { None, Cfg, Start, Stop, Estop };
@@ -82,6 +88,29 @@ void low_priority_thread()
     pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
 }
 
+void parse_cfg_field(Config &cfg, const std::string &k, const std::string &v)
+{
+    if (k == "mode") cfg.mode = (v == "voltage") ? 1 : 0;
+    else if (k == "ctrl") cfg.speed_ctrl = (v == "speed");
+    else if (k == "dir") cfg.direction = std::stoi(v) >= 0 ? 1 : -1;
+    else if (k == "ref") cfg.cycle = (v == "cycle");
+    else if (k == "preview") cfg.preview = (std::stoi(v) != 0);
+    else if (k == "value") cfg.value = std::stod(v);
+    else if (k == "t0") cfg.t0 = std::max(0.0, std::stod(v));
+    else if (k == "matrices") cfg.use_csv = (v == "csv");
+    else if (k == "L") cfg.params.L = std::stod(v);
+    else if (k == "R") cfg.params.R = std::stod(v);
+    else if (k == "b") cfg.params.b = std::stod(v);
+    else if (k == "km") { cfg.params.k_m = std::stod(v); cfg.params_curr.k_m = cfg.params.k_m; }
+    else if (k == "JM") { cfg.params.J_M = std::stod(v); cfg.params_curr.J_M = cfg.params.J_M; }
+    else if (k == "JL") { cfg.params.J_L = std::stod(v); cfg.params_curr.J_L = cfg.params.J_L; }
+    else if (k == "i0") cfg.params_curr.i0 = std::stod(v);
+    else if (k == "w0") cfg.params_curr.w0 = std::stod(v);
+    else if (k == "umx") cfg.params.umx = std::stod(v);
+    else if (k == "imx") { cfg.params.imx = std::stod(v); cfg.params_curr.imx = cfg.params.imx; }
+    else if (k == "wmx") cfg.params_curr.wmx = std::stod(v);
+}
+
 void reader_thread()
 {
     low_priority_thread();
@@ -100,13 +129,7 @@ void reader_thread()
                 if (eq == std::string::npos) continue;
                 const std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
                 try {
-                    if (k == "mode") cfg.mode = (v == "voltage") ? 1 : 0;
-                    else if (k == "ctrl") cfg.speed_ctrl = (v == "speed");
-                    else if (k == "dir") cfg.direction = std::stoi(v) >= 0 ? 1 : -1;
-                    else if (k == "ref") cfg.cycle = (v == "cycle");
-                    else if (k == "preview") cfg.preview = (std::stoi(v) != 0);
-                    else if (k == "value") cfg.value = std::stod(v);
-                    else if (k == "t0") cfg.t0 = std::max(0.0, std::stod(v));
+                    parse_cfg_field(cfg, k, v);
                 } catch (...) { post_error("bad CFG field: " + kv); }
             }
             cmd = Cmd::Cfg;
@@ -216,6 +239,13 @@ std::unique_ptr<C> make_controller(const std::string &dir)
     return std::make_unique<C>(H, Aineq, Fx, Fu0, Fd, Fr, Ex, Eu0, Ed, bconst, umx, Aaug, Baug, Caug, Lgain);
 }
 
+template <class C>
+std::unique_ptr<C> make_controller(const mpc_prep::Matrices &m)
+{
+    return std::make_unique<C>(m.H, m.Aineq, m.Fx, m.Fu0, m.Fd, m.Fr, m.Ex, m.Eu0, m.Ed,
+                               m.bconst, m.umx, m.Aaug, m.Baug, m.Caug, m.Lgain);
+}
+
 void run(NssSPI &spi)
 {
     const auto process_start = monotonic_ns();
@@ -274,8 +304,19 @@ void run(NssSPI &spi)
                 try {
                     run_cfg = cfg;
                     const std::string root = g_matrix_root;
-                    if (run_cfg.mode == 1) { ctrl_v = make_controller<MpcController>(root + "/mpc_matrices"); ctrl_i.reset(); }
-                    else                   { ctrl_i = make_controller<MpcControllerCurr>(root + "/mpc_matrices_curr"); ctrl_v.reset(); }
+                    if (run_cfg.mode == 1) {
+                        if (run_cfg.use_csv)
+                            ctrl_v = make_controller<MpcController>(root + "/mpc_matrices");
+                        else
+                            ctrl_v = make_controller<MpcController>(mpc_prep::compute(run_cfg.params));
+                        ctrl_i.reset();
+                    } else {
+                        if (run_cfg.use_csv)
+                            ctrl_i = make_controller<MpcControllerCurr>(root + "/mpc_matrices_curr");
+                        else
+                            ctrl_i = make_controller<MpcControllerCurr>(mpc_prep_curr::compute(run_cfg.params_curr));
+                        ctrl_v.reset();
+                    }
 
                     planner::Params pp;
                     pp.speed = run_cfg.speed_ctrl;
@@ -493,5 +534,6 @@ int main(int argc, char **argv)
     }
     return status;
 }
+
 
 

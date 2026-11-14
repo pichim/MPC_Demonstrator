@@ -15,7 +15,7 @@ PySide6_WebEngine==6.12.0.140
 import os, sys, math, csv, time, socket, threading, collections
 from datetime import datetime
 import pyqtgraph as pg
-from PySide6 import QtWidgets as QW, QtCore as QC
+from PySide6 import QtWidgets as QW, QtCore as QC, QtGui as QG
 import numpy as np
 
 try:
@@ -37,6 +37,31 @@ PI_PROGRAM = "mpc_spi"
 PI_SERVER_COMMAND = (f"sudo -S -p '' taskset -c 3 chrt -f 50 "
                      f"{PI_PROJECT_DIR}/host/build/{PI_PROGRAM} --matrices {PI_PROJECT_DIR}/host")
 PING_PERIOD_S = 0.25
+
+IMX_DEFAULT = {"voltage": 1.0, "current": 1.5}
+
+PARAM_GROUPS = [
+    ("Motor (both modes)", [
+        ("L", "Inductance L (H)", 1.31e-3, "Armature inductance. Voltage mode only."),
+        ("R", "Resistance R (Ohm)", 4.532, "Armature resistance. Voltage mode only."),
+        ("km", "Torque constant km (Nm/A)", 97.5e-3, "Torque / back-EMF constant."),
+        ("JM", "Motor inertia JM (kg m²)", 71.7e-7, "Rotor inertia."),
+        ("JL", "Load inertia JL (kg m²)", 0.0, "Added load inertia. Total inertia is JM + JL."),
+    ]),
+    ("Voltage mode", [
+        ("b", "Viscous friction b (Nm s/rad)", 6.632e-6, "Viscous friction coefficient."),
+        ("umx", "Voltage limit umx (V)", 10.0, "Voltage constraint inside the MPC."),
+    ]),
+    ("Current mode", [
+        ("i0", "No-load current i0 (A)", 41.6e-3, "Friction is derived as b = km * i0 / w0."),
+        ("w0", "No-load speed w0 (rad/s)", 2 * math.pi * 5840 / 60, "Friction is derived as b = km * i0 / w0."),
+        ("wmx", "Speed limit wmx (rad/s)", 100.0, "Speed constraint inside the MPC."),
+    ]),
+    ("Constraints", [
+        ("imx", "Current limit imx (A)", None, "Current constraint inside the MPC.\nDefault: 1.0 A in voltage mode, 1.5 A in current mode."),
+    ]),
+]
+PARAM_DEFAULTS = {k: d for _, items in PARAM_GROUPS for k, _, d, _ in items}
 
 TABS = [
     ("Motion", [
@@ -64,7 +89,7 @@ class NullSource:
     def __init__(self):
         self.state, self.connected = "IDLE", True
 
-    set_mode = set_ctrl = set_dir = set_ref = lambda self, v: None
+    set_mode = set_ctrl = set_dir = set_ref = set_params = lambda self, v: None
     def start(self): self.state = "RUNNING"
     def stop(self): self.state = "IDLE"
     def estop(self): self.state = "FAULT"
@@ -80,7 +105,8 @@ class PiLink(QC.QObject):
         super().__init__()
         self._server_command = server_command
         self.busy, self.connected, self.state = False, False, "DISCONNECTED"
-        self._cfg = dict(mode="voltage", ctrl="position", dir=1, ref=dict(type="step", value=3.0, t0=1.0, preview=True))
+        self._cfg = dict(mode="voltage", ctrl="position", dir=1, ref=dict(type="step", value=3.0, t0=1.0, preview=True),
+                         params=dict(matrices="gui", values={}))
         self._lock = threading.Lock()
         self._samples, self._chan, self._closing, self._thread = [], None, False, None
 
@@ -225,11 +251,14 @@ class PiLink(QC.QObject):
     def set_ctrl(self, ctrl): self._cfg["ctrl"] = ctrl
     def set_dir(self, d): self._cfg["dir"] = -1 if d > 0 else 1
     def set_ref(self, ref): self._cfg["ref"] = dict(ref)
+    def set_params(self, params): self._cfg["params"] = dict(params)
 
     def start(self):
-        c, r = self._cfg, self._cfg["ref"]
+        c, r, p = self._cfg, self._cfg["ref"], self._cfg["params"]
+        extra = " ".join(f"{k}={v:.9g}" for k, v in p["values"].items())
         self._send(f"CFG mode={c['mode']} ctrl={c['ctrl']} dir={c['dir']} ref={r['type']} "
-                   f"value={r['value']:.6g} t0={r['t0']:.6g} preview={1 if r['preview'] else 0}")
+                   f"value={r['value']:.6g} t0={r['t0']:.6g} preview={1 if r['preview'] else 0} "
+                   f"matrices={p['matrices']} {extra}")
         self._send("START")
 
     def stop(self): self._send("STOP")
@@ -256,6 +285,7 @@ class MainWindow(QW.QMainWindow):
         self.rec, self.recording, self.rec_dirty = [], False, False
         self._last_dir = os.path.expanduser("~")
         self.autoscale = []
+        self.param_edits, self.params_page, self._prev_mode = {}, None, "voltage"
 
         central = QW.QWidget()
         self.setCentralWidget(central)
@@ -396,7 +426,83 @@ class MainWindow(QW.QMainWindow):
         tabs = QW.QTabWidget()
         for name, specs in TABS:
             tabs.addTab(self._make_tab(specs), name)
+        tabs.addTab(self._build_params_tab(), "Parameters")
         return tabs
+
+    def _build_params_tab(self):
+        page = QW.QWidget()
+        self.params_page = page
+        lay = QW.QVBoxLayout(page)
+
+        validator = QG.QDoubleValidator()
+        validator.setNotation(QG.QDoubleValidator.ScientificNotation)
+        validator.setLocale(QC.QLocale.c())
+
+        g = QW.QGroupBox("Matrices source")
+        f = QW.QFormLayout(g)
+        self.matrices_src = QW.QComboBox()
+        self.matrices_src.addItems(["GUI parameters", "CSV files"])
+        self._row(f, "Use", self.matrices_src,
+                  "GUI parameters: the Pi computes the MPC matrices from the values below\n"
+                  "CSV files: the Pi loads the matrices exported from MATLAB (parameters below are ignored)")
+        lay.addWidget(g)
+
+        for title, items in PARAM_GROUPS:
+            g = QW.QGroupBox(title)
+            f = QW.QFormLayout(g)
+            for key, label, default, tip in items:
+                e = QW.QLineEdit()
+                e.setValidator(validator)
+                e.setMaximumWidth(160)
+                e.editingFinished.connect(lambda k=key: self._fix_param(k))
+                self.param_edits[key] = e
+                self._row(f, label, e, tip)
+            lay.addWidget(g)
+
+        self.reset_params_btn = QW.QPushButton("Reset parameters")
+        self.reset_params_btn.setToolTip("Put all parameters back to their default values")
+        self.reset_params_btn.clicked.connect(self.on_reset_params)
+        lay.addWidget(self.reset_params_btn)
+        lay.addStretch(1)
+
+        self.on_reset_params()
+
+        scroll = QW.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        self.params_scroll = scroll
+        return scroll
+
+    def _mode_key(self):
+        return self.mode.currentText().lower()
+
+    def _default_param(self, key, mode=None):
+        if key == "imx":
+            return IMX_DEFAULT[mode or self._mode_key()]
+        return PARAM_DEFAULTS[key]
+
+    @staticmethod
+    def _fmt(v):
+        return f"{v:.6g}"
+
+    def _fix_param(self, key):
+        e = self.param_edits[key]
+        try:
+            v = float(e.text())
+        except ValueError:
+            v = self._default_param(key)
+        e.setText(self._fmt(v))
+
+    def _param_value(self, key):
+        try:
+            return float(self.param_edits[key].text())
+        except ValueError:
+            return self._default_param(key)
+
+    def on_reset_params(self):
+        for key, e in self.param_edits.items():
+            e.setText(self._fmt(self._default_param(key)))
+        self.matrices_src.setCurrentIndex(0)
 
     def _make_tab(self, specs):
         w = pg.GraphicsLayoutWidget()
@@ -459,6 +565,16 @@ class MainWindow(QW.QMainWindow):
         if self.u_plot is not None:
             self.u_plot.setTitle("Controller output (current)" if cur else "Controller output (voltage)")
             self.u_plot.setLabel("left", "Current (A)" if cur else "Voltage (V)")
+        new = self._mode_key()
+        e = self.param_edits.get("imx")
+        if e is not None and new != self._prev_mode:
+            try:
+                unchanged = abs(float(e.text()) - IMX_DEFAULT[self._prev_mode]) < 1e-12
+            except ValueError:
+                unchanged = True
+            if unchanged:
+                e.setText(self._fmt(IMX_DEFAULT[new]))
+        self._prev_mode = new
 
     def _update_value_limit(self):
         speed = self._is_speed()
@@ -487,6 +603,8 @@ class MainWindow(QW.QMainWindow):
         connected, busy = getattr(self.src, "connected", False), getattr(self.src, "busy", False)
         for w in (self.mode, self.ctrl, self.cw_btn, self.ccw_btn, self.t0):
             w.setEnabled(not running)
+        if self.params_page is not None:
+            self.params_page.setEnabled(not running)
         self.start_btn.setEnabled(not running and connected)
         self.stop_btn.setEnabled(connected)
         self.estop_btn.setEnabled(connected)
@@ -526,6 +644,8 @@ class MainWindow(QW.QMainWindow):
         self.src.set_dir(1 if self.cw_btn.isChecked() else -1)
         self.src.set_ref(dict(type=self.ref_type.currentText().lower(), value=self.value.value(),
                               t0=self.t0.value(), preview=self.preview.isChecked()))
+        self.src.set_params(dict(matrices="gui" if self.matrices_src.currentIndex() == 0 else "csv",
+                                 values={k: self._param_value(k) for k in self.param_edits}))
         self.src.start()
         self._update_enabled()
 
@@ -644,3 +764,5 @@ def main():
 if __name__ == "__main__":
     main()
 
+
+    
