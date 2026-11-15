@@ -142,6 +142,10 @@ public:
         int fault;
     };
 
+    // One-sample delay: the command computed here is applied one sample later.
+    //   xhat   = x_hat(k|k-1)   (stored)
+    //   xn     = x_hat(k+1|k) = Acl*xhat + Baug*u_{k-1} + L*y_k
+    //   QP starts from xn (state at the time u_k starts acting), u_old = u_{k-1}
     Result step(const Eigen::Vector2d& xmeas, const VecS& rref) {
         Result out;
         out.status = 0; out.iters = 0; out.fault = 0;
@@ -156,8 +160,19 @@ public:
             return out;
         }
 
+        // Previous command (the one that acts during the next sample interval).
+        const double u_old = u_prev_valid;
+
+        // Observer update FIRST, with the previous command and the newest measurement.
+        const VecXA xn = Acl * xhat + Baug * u_old + Lgain * xmeas;
+        if (!xn.allFinite()) {
+            fallback(out);
+            out.xhat = xhat;
+            return out;
+        }
+
         VecP p;
-        p << xhat.template head<NX>(), u_prev_valid, xhat(NX);
+        p << xn.template head<NX>(), u_old, xn(NX);
 
         VecN f;
         f.template head<N>() = Ff * p + Frp * rref;
@@ -202,8 +217,7 @@ public:
         u_apply = std::min(std::max(u_apply, -umx), umx);
         u_prev_valid = u_apply;
 
-        VecXA xn = Acl * xhat + Baug * u_apply + Lgain * xmeas;
-        if (xn.allFinite()) xhat = xn;
+        xhat = xn;   // already checked finite above
 
         out.u_apply = u_apply;
         out.xhat = xhat;
