@@ -81,11 +81,13 @@ PARAM_GROUPS = [
     ]),
     ("Constraints", [
         ("imx", "Current limit imx (A)", None, "Current constraint inside the MPC\nDefault: 1.0 A in voltage mode, 1.5 A in current mode\nuC limit 1.7A max"),
-        ("wmx", "Speed limit wmx (rad/s)", 100.0, "Speed constraint inside the MPC (current mode)"),
+        ("wmx", "Speed limit wmx (rad/s)", 100.0, "Speed constraint inside the MPC (current mode)\nLimited to 150 rad/s"),
         ("umx", "Voltage limit umx (V)", 10.0, "Voltage constraint inside the MPC (voltage mode)\nuC limit 24V max"),
     ]),
 ]
 PARAM_DEFAULTS = {k: d for _, items in PARAM_GROUPS for k, _, d, _ in items}
+
+PARAM_LIMITS = {"imx": (0.0, 1.7),"umx": (0.0, 24.0), "wmx": (0.0, 150.0), }
 
 TABS = [
     ("Motion", [
@@ -630,19 +632,29 @@ class MainWindow(QW.QMainWindow):
     def _fmt(v):
         return f"{v:.6g}"
 
+    @staticmethod
+    def _clamp(key, v):
+        lo, hi = PARAM_LIMITS.get(key, (-math.inf, math.inf))
+        return min(max(v, lo), hi)
+
     def _fix_param(self, key):
         e = self.param_edits[key]
         try:
             v = float(e.text())
         except ValueError:
             v = self._default_param(key)
-        e.setText(self._fmt(v))
+        clamped = self._clamp(key, v)
+        if clamped != v:
+            lo, hi = PARAM_LIMITS[key]
+            self.statusBar().showMessage(f"{key} limited to the range {lo:g} to {hi:g}")
+        e.setText(self._fmt(clamped))
 
     def _param_value(self, key):
         try:
-            return float(self.param_edits[key].text())
+            v = float(self.param_edits[key].text())
         except ValueError:
-            return self._default_param(key)
+            v = self._default_param(key)
+        return self._clamp(key, v)
 
     def on_reset_params(self):
         for key, e in self.param_edits.items():
