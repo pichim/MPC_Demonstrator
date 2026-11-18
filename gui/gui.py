@@ -32,33 +32,57 @@ WINDOW_S, SAMPLE_DT, DECIMALS = 10.0, 0.01, 3
 MAX_STEP_RAD = 30 * 2 * math.pi
 PREVIEW_MAX_RAD, SPEED_MAX = 1e6, 80
 LEGEND_W, AXIS_W = 130, 70
+
 PI_PROJECT_DIR = "/home/pi/MPC_Demonstrator"
 PI_PROGRAM = "mpc_spi"
 PI_SERVER_COMMAND = (f"sudo -S -p '' taskset -c 3 chrt -f 50 "
                      f"{PI_PROJECT_DIR}/host/build/{PI_PROGRAM} --matrices {PI_PROJECT_DIR}/host")
+PI_SOLVER_V = f"{PI_PROJECT_DIR}/host/MPCcontroller/mpc_solver.hpp"
+PI_SOLVER_I = f"{PI_PROJECT_DIR}/host/MPCcontroller/mpc_solver_iRef.hpp"
+PI_BUILD_COMMAND = (f"cd {PI_PROJECT_DIR} && cmake -S host -B host/build -DCMAKE_BUILD_TYPE=Release && "
+                    f"cmake --build host/build -j2")
 PING_PERIOD_S = 0.25
 
 IMX_DEFAULT = {"voltage": 1.0, "current": 1.5}
 
 PARAM_GROUPS = [
+    ("General (both modes)", [
+        ("Ts", "Sampling time Ts (s)", 1e-3, "Sampling time used to discretise the model"),
+    ]),
     ("Motor (both modes)", [
-        ("L", "Inductance L (H)", 1.31e-3, "Armature inductance. Voltage mode only."),
-        ("R", "Resistance R (Ohm)", 4.532, "Armature resistance. Voltage mode only."),
-        ("km", "Torque constant km (Nm/A)", 97.5e-3, "Torque / back-EMF constant."),
-        ("JM", "Motor inertia JM (kg m²)", 71.7e-7, "Rotor inertia."),
-        ("JL", "Load inertia JL (kg m²)", 0.0, "Added load inertia. Total inertia is JM + JL."),
+        ("L", "Inductance L (H)", 1.31e-3, "Armature inductance. Voltage mode only"),
+        ("R", "Resistance R (Ohm)", 4.532, "Armature resistance. Voltage mode only"),
+        ("km", "Torque constant km (Nm/A)", 97.5e-3, "Torque / back-EMF constant"),
+        ("JM", "Motor inertia JM (kg m²)", 71.7e-7, "Rotor inertia"),
+        ("JL", "Load inertia JL (kg m²)", 0.0, "Added load inertia. Total inertia is JM + JL"),
     ]),
     ("Voltage mode", [
-        ("b", "Viscous friction b (Nm s/rad)", 6.632e-6, "Viscous friction coefficient."),
-        ("umx", "Voltage limit umx (V)", 10.0, "Voltage constraint inside the MPC."),
+        ("b", "Viscous friction b (Nm s/rad)", 6.632e-6, "Viscous friction coefficient"),
+        ("Q1", "Weight Q current", 0.0002936, "State weight on current"),
+        ("Q2", "Weight Q speed", 0.0002109, "State weight on speed"),
+        ("Q3", "Weight Q position", 100.0, "State weight on position"),
+        ("Rw", "Weight Rw (du)", 0.6548, "Input increment weight"),
+        ("Qn1", "Kalman Qn current", 0.08917, "Process noise, current state"),
+        ("Qn2", "Kalman Qn speed", 5.594e-07, "Process noise, speed state"),
+        ("Qn3", "Kalman Qn position", 1.177e-05, "Process noise, position state"),
+        ("Qn4", "Kalman Qn disturbance", 2.763e-08, "Process noise, disturbance state"),
+        ("Rn1", "Kalman Rn current", 3.265e-06, "Measurement noise, current"),
+        ("Rn2", "Kalman Rn position", 3.475e-08, "Measurement noise, position"),
     ]),
     ("Current mode", [
-        ("i0", "No-load current i0 (A)", 41.6e-3, "Friction is derived as b = km * i0 / w0."),
-        ("w0", "No-load speed w0 (rad/s)", 2 * math.pi * 5840 / 60, "Friction is derived as b = km * i0 / w0."),
-        ("wmx", "Speed limit wmx (rad/s)", 100.0, "Speed constraint inside the MPC."),
+        ("i0", "No-load current i0 (A)", 41.6e-3, "Friction is derived as b = km * i0 / w0"),
+        ("w0", "No-load speed w0 (rad/s)", 2 * math.pi * 5840 / 60, "Friction is derived as b = km * i0 / w0"),
+        ("Qc", "Weight Q position", 100.0, "Position tracking weight"),
+        ("RwC", "Weight Rw (du)", 10.0, "Input increment weight"),
+        ("QnC1", "Kalman Qn speed", 0.0211, "Process noise, speed state"),
+        ("QnC2", "Kalman Qn position", 5.186e-05, "Process noise, position state"),
+        ("QnC3", "Kalman Qn disturbance", 8.441e-06, "Process noise, disturbance state"),
+        ("RnC", "Kalman Rn position", 1e-4, "Measurement noise, position"),
     ]),
     ("Constraints", [
-        ("imx", "Current limit imx (A)", None, "Current constraint inside the MPC.\nDefault: 1.0 A in voltage mode, 1.5 A in current mode."),
+        ("imx", "Current limit imx (A)", None, "Current constraint inside the MPC\nDefault: 1.0 A in voltage mode, 1.5 A in current mode\nuC limit 1.7A max"),
+        ("wmx", "Speed limit wmx (rad/s)", 100.0, "Speed constraint inside the MPC (current mode)"),
+        ("umx", "Voltage limit umx (V)", 10.0, "Voltage constraint inside the MPC (voltage mode)\nuC limit 24V max"),
     ]),
 ]
 PARAM_DEFAULTS = {k: d for _, items in PARAM_GROUPS for k, _, d, _ in items}
@@ -99,19 +123,20 @@ class NullSource:
 class PiLink(QC.QObject):
     message = QC.Signal(str)
     changed = QC.Signal()
+    horizons = QC.Signal(int, int, int)
     T_FIELDS = [f for f in FIELDS if f != "total_us"]
 
     def __init__(self, server_command=PI_SERVER_COMMAND):
         super().__init__()
         self._server_command = server_command
-        self.busy, self.connected, self.state = False, False, "DISCONNECTED"
+        self.busy, self.connected, self.state, self.building = False, False, "DISCONNECTED", False
         self._cfg = dict(mode="voltage", ctrl="position", dir=1, ref=dict(type="step", value=3.0, t0=1.0, preview=True),
                          params=dict(matrices="gui", values={}))
         self._lock = threading.Lock()
         self._samples, self._chan, self._closing, self._thread = [], None, False, None
 
     def connect_to(self, address, password):
-        if self.busy:
+        if self.busy or self.building:
             return
         if paramiko is None:
             self.message.emit("The ssh library is missing. Install it with: pip install paramiko")
@@ -121,6 +146,16 @@ class PiLink(QC.QObject):
         self._thread = threading.Thread(target=self._worker, args=(address, password), daemon=True)
         self._thread.start()
 
+    def rebuild(self, address, password, n, npred, nc):
+        if self.busy or self.building:
+            return
+        if paramiko is None:
+            self.message.emit("The ssh library is missing. Install it with: pip install paramiko")
+            return
+        self.building = True
+        self.changed.emit()
+        threading.Thread(target=self._build_worker, args=(address, password, n, npred, nc), daemon=True).start()
+
     @staticmethod
     def _split_address(address):
         user, _, host = address.rpartition("@")
@@ -129,6 +164,54 @@ class PiLink(QC.QObject):
             host, _, p = host.rpartition(":")
             port = int(p)
         return (user or None), host, port
+
+    def _build_worker(self, address, password, n, npred, nc):
+        client, why = None, None
+        try:
+            user, host, port = self._split_address(address)
+            self.message.emit(f"Connecting to {host} ...")
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(host, port=port, username=user, password=password, timeout=8, banner_timeout=8,
+                           auth_timeout=8, look_for_keys=False, allow_agent=False)
+            cmd = (rf"sed -i -E 's/^( *constexpr int N +=) *[0-9]+;/\1 {n};/' {PI_SOLVER_V} && "
+                   rf"sed -i -E 's/^( *constexpr int Np +=) *[0-9]+;/\1 {npred};/' {PI_SOLVER_I} && "
+                   rf"sed -i -E 's/^( *constexpr int Nc +=) *[0-9]+;/\1 {nc};/' {PI_SOLVER_I} && "
+                   f"{PI_BUILD_COMMAND}")
+            self.message.emit("Recompiling on the Pi .......")
+            chan = client.get_transport().open_session()
+            chan.set_combine_stderr(True)
+            chan.exec_command(cmd)
+            out = b""
+            while True:
+                if chan.recv_ready():
+                    out = (out + chan.recv(65536))[-4000:]
+                elif chan.exit_status_ready():
+                    break
+                else:
+                    time.sleep(0.1)
+            while chan.recv_ready():
+                out = (out + chan.recv(65536))[-4000:]
+            lines = out.decode(errors="replace").strip().splitlines()
+            if chan.recv_exit_status() != 0:
+                why = "Build failed: " + (lines[-1] if lines else "unknown error")
+            else:
+                why = f"Build finished (N={n}, Np={npred}, Nc={nc}). Connect again."
+        except paramiko.AuthenticationException:
+            why = "Wrong user name or password"
+        except ValueError:
+            why = "Invalid address (expected user@host)"
+        except (paramiko.SSHException, OSError, socket.timeout) as e:
+            why = f"Build connection failed: {e}"
+        finally:
+            try:
+                if client is not None:
+                    client.close()
+            except Exception:
+                pass
+            self.building = False
+            self.message.emit(why or "Build finished")
+            self.changed.emit()
 
     def _worker(self, address, password):
         client, why = None, None
@@ -214,6 +297,12 @@ class PiLink(QC.QObject):
             self.connected, self.state = True, "IDLE"
             self.message.emit("Connected")
             self.changed.emit()
+        elif line.startswith("I "):
+            try:
+                n, npred, nc = (int(x) for x in line.split()[1:4])
+            except ValueError:
+                return
+            self.horizons.emit(n, npred, nc)
         elif line.startswith("E "):
             self.message.emit("Pi: " + line[2:])
 
@@ -295,6 +384,7 @@ class MainWindow(QW.QMainWindow):
         if hasattr(self.src, "message"):
             self.src.message.connect(self.statusBar().showMessage)
             self.src.changed.connect(self._on_link_changed)
+            self.src.horizons.connect(self._on_horizons)
             self.statusBar().showMessage("Not connected")
         else:
             self.statusBar().showMessage("Offline mode")
@@ -427,7 +517,16 @@ class MainWindow(QW.QMainWindow):
         for name, specs in TABS:
             tabs.addTab(self._make_tab(specs), name)
         tabs.addTab(self._build_params_tab(), "Parameters")
+        tabs.addTab(self._build_horizon_tab(), "Horizons")
         return tabs
+
+    def _update_matrices_options(self):
+        default_horizons = (self.h_n.value() == 20 and self.h_np.value() == 20 and self.h_nc.value() == 5)
+        csv_index = self.matrices_src.findText("CSV files")
+        self.matrices_src.model().item(csv_index).setEnabled(default_horizons)
+
+        if not default_horizons and self.matrices_src.currentIndex() == csv_index:
+            self.matrices_src.setCurrentIndex(0)
 
     def _build_params_tab(self):
         page = QW.QWidget()
@@ -444,7 +543,9 @@ class MainWindow(QW.QMainWindow):
         self.matrices_src.addItems(["GUI parameters", "CSV files"])
         self._row(f, "Use", self.matrices_src,
                   "GUI parameters: the Pi computes the MPC matrices from the values below\n"
-                  "CSV files: the Pi loads the matrices exported from MATLAB (parameters below are ignored)")
+                  "CSV files: the Pi loads the matrices exported from MATLAB (parameters below are ignored)\n" \
+                  "CSV files mode will fail if horizons compiled on the PI are not N=20, Np=20, Nc=5\n" \
+                  "CSV files mode is only available if user enters N=20, Np=20, Nc=5 in the horizons tabs")
         lay.addWidget(g)
 
         for title, items in PARAM_GROUPS:
@@ -472,6 +573,50 @@ class MainWindow(QW.QMainWindow):
         scroll.setWidget(page)
         self.params_scroll = scroll
         return scroll
+
+    def _build_horizon_tab(self):
+        page = QW.QWidget()
+        lay = QW.QVBoxLayout(page)
+        g = QW.QGroupBox("Horizons (compiled into the controller)")
+        f = QW.QFormLayout(g)
+        self.h_n, self.h_np, self.h_nc = QW.QSpinBox(), QW.QSpinBox(), QW.QSpinBox()
+        for s, lo, hi, v in ((self.h_n, 2, 200, 20), (self.h_np, 2, 200, 20), (self.h_nc, 2, 200, 5)):
+            s.setRange(lo, hi)
+            s.setValue(v)
+            self.h_n.valueChanged.connect(self._update_matrices_options)
+            self.h_np.valueChanged.connect(self._update_matrices_options)
+            self.h_nc.valueChanged.connect(self._update_matrices_options)
+        self._row(f, "Horizon N (voltage mode)", self.h_n, "Prediction / control horizon of the voltage MPC")
+        self._row(f, "Prediction Np (current mode)", self.h_np, "Prediction horizon of the current MPC")
+        self._row(f, "Control Nc (current mode)", self.h_nc,
+                  "Control horizon of the current MPC\nMust satisfy 2 <= Nc <= Np")
+        self.h_lbl = QW.QLabel("Compiled values appear after connecting")
+        f.addRow(self.h_lbl)
+        self.rebuild_btn = QW.QPushButton("Apply and recompile on the Pi")
+        self.rebuild_btn.setToolTip("Writes the horizons into the solver headers on the Pi and rebuilds\n"
+                                    "Only possible while disconnected. Connect again afterwards\n"
+                                    "CSV files will only work with N=20, Np=20, Nc=5 compiled")
+        self.rebuild_btn.clicked.connect(self.on_rebuild)
+        f.addRow(self.rebuild_btn)
+        lay.addWidget(g)
+        lay.addStretch(1)
+        return page
+
+    def _on_horizons(self, n, npred, nc):
+        self.h_n.setValue(n)
+        self.h_np.setValue(npred)
+        self.h_nc.setValue(nc)
+        self.h_lbl.setText(f"Compiled on the Pi: N={n}, Np={npred}, Nc={nc}")
+
+    def on_rebuild(self):
+        n, npred, nc = self.h_n.value(), self.h_np.value(), self.h_nc.value()
+        if nc > npred:
+            QW.QMessageBox.warning(self, "Horizons", "Nc must be less than or equal to Np.")
+            return
+        address = self.ip.text().strip()
+        pwd, ok = QW.QInputDialog.getText(self, "Recompile on the Pi", f"Password for {address}:", QW.QLineEdit.Password)
+        if ok and pwd:
+            self.src.rebuild(address, pwd, n, npred, nc)
 
     def _mode_key(self):
         return self.mode.currentText().lower()
@@ -510,6 +655,8 @@ class MainWindow(QW.QMainWindow):
         for row, sp in enumerate(specs):
             p = w.addPlot(row=row, col=0, title=sp["title"],
                           axisItems={"left": FixedAxis("left", sp.get("dec", DECIMALS)), "bottom": FixedAxis("bottom")})
+            if sp["title"] == "Position":
+                p.getViewBox().invertY(True)
             p.getAxis("left").setWidth(AXIS_W)
             if "tick" in sp:
                 p.getAxis("left").setTickSpacing(sp["tick"], sp["tick"])
@@ -601,6 +748,7 @@ class MainWindow(QW.QMainWindow):
         running = self.src.state == "RUNNING"
         speed, cycle = self._is_speed(), self.ref_type.currentText() == "Cycle"
         connected, busy = getattr(self.src, "connected", False), getattr(self.src, "busy", False)
+        building = getattr(self.src, "building", False)
         for w in (self.mode, self.ctrl, self.cw_btn, self.ccw_btn, self.t0):
             w.setEnabled(not running)
         if self.params_page is not None:
@@ -608,13 +756,14 @@ class MainWindow(QW.QMainWindow):
         self.start_btn.setEnabled(not running and connected)
         self.stop_btn.setEnabled(connected)
         self.estop_btn.setEnabled(connected)
-        self.ip.setEnabled(not busy)
+        self.ip.setEnabled(not busy and not building)
         if busy and not connected:
             self.conn_btn.setText("Connecting...")
             self.conn_btn.setEnabled(False)
         else:
             self.conn_btn.setText("Disconnect" if busy else "Connect")
-            self.conn_btn.setEnabled(hasattr(self.src, "connect_to"))
+            self.conn_btn.setEnabled(hasattr(self.src, "connect_to") and not building)
+        self.rebuild_btn.setEnabled(hasattr(self.src, "rebuild") and not busy and not building)
         self.ref_type.setEnabled(not running and not speed)
         self.value.setEnabled(not cycle)
         self.preview.setEnabled(not running and not speed and not cycle)
@@ -765,4 +914,4 @@ if __name__ == "__main__":
     main()
 
 
-    
+

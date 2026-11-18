@@ -98,6 +98,7 @@ void parse_cfg_field(Config &cfg, const std::string &k, const std::string &v)
     else if (k == "value") cfg.value = std::stod(v);
     else if (k == "t0") cfg.t0 = std::max(0.0, std::stod(v));
     else if (k == "matrices") cfg.use_csv = (v == "csv");
+    else if (k == "Ts") { cfg.params.Ts = std::stod(v); cfg.params_curr.Ts = cfg.params.Ts; }
     else if (k == "L") cfg.params.L = std::stod(v);
     else if (k == "R") cfg.params.R = std::stod(v);
     else if (k == "b") cfg.params.b = std::stod(v);
@@ -109,6 +110,22 @@ void parse_cfg_field(Config &cfg, const std::string &k, const std::string &v)
     else if (k == "umx") cfg.params.umx = std::stod(v);
     else if (k == "imx") { cfg.params.imx = std::stod(v); cfg.params_curr.imx = cfg.params.imx; }
     else if (k == "wmx") cfg.params_curr.wmx = std::stod(v);
+    else if (k == "Q1") cfg.params.Qdiag(0) = std::stod(v);
+    else if (k == "Q2") cfg.params.Qdiag(1) = std::stod(v);
+    else if (k == "Q3") cfg.params.Qdiag(2) = std::stod(v);
+    else if (k == "Rw") cfg.params.Rw = std::stod(v);
+    else if (k == "Qn1") cfg.params.Qndiag(0) = std::stod(v);
+    else if (k == "Qn2") cfg.params.Qndiag(1) = std::stod(v);
+    else if (k == "Qn3") cfg.params.Qndiag(2) = std::stod(v);
+    else if (k == "Qn4") cfg.params.Qndiag(3) = std::stod(v);
+    else if (k == "Rn1") cfg.params.Rndiag(0) = std::stod(v);
+    else if (k == "Rn2") cfg.params.Rndiag(1) = std::stod(v);
+    else if (k == "Qc") cfg.params_curr.Q = std::stod(v);
+    else if (k == "RwC") cfg.params_curr.Rw = std::stod(v);
+    else if (k == "QnC1") cfg.params_curr.Qndiag(0) = std::stod(v);
+    else if (k == "QnC2") cfg.params_curr.Qndiag(1) = std::stod(v);
+    else if (k == "QnC3") cfg.params_curr.Qndiag(2) = std::stod(v);
+    else if (k == "RnC") cfg.params_curr.Rn = std::stod(v);
 }
 
 void reader_thread()
@@ -167,6 +184,7 @@ void writer_thread()
     int last_state = -1;
     char buf[256];
     std::fputs("H mpc_server 1\n", stdout);
+    std::printf("I %d %d %d\n", MpcController::N, MpcControllerCurr::Np, MpcControllerCurr::Nc);
     std::fflush(stdout);
     for (;;) {
         const bool done = g_stop;
@@ -303,6 +321,9 @@ void run(NssSPI &spi)
             } else if (cmd == Cmd::Start && state != RUNNING) {
                 try {
                     run_cfg = cfg;
+                    run_cfg.params.N = MpcController::N;
+                    run_cfg.params_curr.Np = MpcControllerCurr::Np;
+                    run_cfg.params_curr.Nc = MpcControllerCurr::Nc;
                     const std::string root = g_matrix_root;
                     if (run_cfg.mode == 1) {
                         if (run_cfg.use_csv)
@@ -351,7 +372,12 @@ void run(NssSPI &spi)
             const double tr = (read_end - run_start) / 1e9;
             const planner::Output ro = ref.step(tr, position);
 
-            Eigen::Matrix<double, MpcController::N, 1> rprev;
+            Eigen::VectorXd rprev;
+            if (run_cfg.mode == 1) {
+                rprev.resize(MpcController::N);
+            } else {
+                rprev.resize(MpcControllerCurr::Np);
+            }
 
             bool reference_done = false;
 
