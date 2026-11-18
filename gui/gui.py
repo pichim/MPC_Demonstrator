@@ -47,7 +47,7 @@ IMX_DEFAULT = {"voltage": 1.0, "current": 1.5}
 
 PARAM_GROUPS = [
     ("General (both modes)", [
-        ("Ts", "Sampling time Ts (s)", 1e-3, "Sampling time used to discretise the model"),
+        ("Ts", "Sampling time Ts (s)", 1e-3, "Sampling time used to discretise the model\nPossible range: 0.1-10 ms"),
     ]),
     ("Motor (both modes)", [
         ("L", "Inductance L (H)", 1.31e-3, "Armature inductance. Voltage mode only"),
@@ -87,7 +87,7 @@ PARAM_GROUPS = [
 ]
 PARAM_DEFAULTS = {k: d for _, items in PARAM_GROUPS for k, _, d, _ in items}
 
-PARAM_LIMITS = {"imx": (0.0, 1.7),"umx": (0.0, 24.0), "wmx": (0.0, 150.0), }
+PARAM_LIMITS = {"imx": (0.0, 1.7),"umx": (0.0, 24.0), "wmx": (0.0, 150.0), "Ts": (0.0001, 0.01), }
 
 TABS = [
     ("Motion", [
