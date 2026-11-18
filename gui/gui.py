@@ -669,6 +669,8 @@ class MainWindow(QW.QMainWindow):
                           axisItems={"left": FixedAxis("left", sp.get("dec", DECIMALS)), "bottom": FixedAxis("bottom")})
             if sp["title"] == "Position":
                 p.getViewBox().invertY(True)
+            if sp["title"] == "Velocity":
+                p.getViewBox().invertY(True)
             p.getAxis("left").setWidth(AXIS_W)
             if "tick" in sp:
                 p.getAxis("left").setTickSpacing(sp["tick"], sp["tick"])
