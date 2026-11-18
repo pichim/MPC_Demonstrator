@@ -369,6 +369,8 @@ class FixedAxis(pg.AxisItem):
 class MainWindow(QW.QMainWindow):
     def __init__(self, source):
         super().__init__()
+        self.total_limit_line = None
+        self.total_limit_plot = None
         self.src, self._was_connected, self.paused = source, False, False
         self.setWindowTitle("MPC control DC motor (Demonstrator app)")
         self.buf = {k: collections.deque(maxlen=int(WINDOW_S / SAMPLE_DT) + 50) for k in FIELDS}
@@ -397,6 +399,7 @@ class MainWindow(QW.QMainWindow):
         self._on_mode()
         self._on_ctrl()
         self._update_rec_ui()
+        self._update_total_limit()
 
     @staticmethod
     def _row(form, label, w, tip):
@@ -648,6 +651,8 @@ class MainWindow(QW.QMainWindow):
             lo, hi = PARAM_LIMITS[key]
             self.statusBar().showMessage(f"{key} limited to the range {lo:g} to {hi:g}")
         e.setText(self._fmt(clamped))
+        if key == "Ts":
+            self._update_total_limit()
 
     def _param_value(self, key):
         try:
@@ -706,9 +711,11 @@ class MainWindow(QW.QMainWindow):
             self._rebuild_legend(legend, entries)
             if "limit" in sp:
                 val, label = sp["limit"]
-                p.addItem(pg.InfiniteLine(pos=val, angle=0, label=label,
-                                          pen=pg.mkPen("r", width=2, style=QC.Qt.DashLine),
-                                          labelOpts={"position": 0.95, "color": "r"}))
+                line = pg.InfiniteLine(pos=val, angle=0, label=label, pen=pg.mkPen("r", width=2, style=QC.Qt.DashLine), labelOpts={"position": 0.85, "color": "r"})
+                p.addItem(line)
+                if sp["title"] == "Total (MPC + SPI)":
+                    self.total_limit_line = line
+                    self.total_limit_plot = p
         return w
 
     def _rebuild_legend(self, legend, entries):
@@ -718,6 +725,14 @@ class MainWindow(QW.QMainWindow):
             if field not in self.hidden_fields:
                 legend.addItem(c, name)
 
+    def _update_total_limit(self):
+        if self.total_limit_line is None:
+            return
+        limit_us = self._param_value("Ts") * 1e6
+        self.total_limit_line.setValue(limit_us)
+        self.total_limit_line.label.setText(f"{limit_us / 1000:g} ms limit")
+        self.total_limit_plot.setYRange(0, max(1200, limit_us * 1.1), padding=0)
+    
     def _is_speed(self):
         return self.ctrl.currentText() == "Speed"
 
