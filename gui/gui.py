@@ -665,6 +665,7 @@ class MainWindow(QW.QMainWindow):
         for key, e in self.param_edits.items():
             e.setText(self._fmt(self._default_param(key)))
         self.matrices_src.setCurrentIndex(0)
+        self._update_total_limit()
 
     def _make_tab(self, specs):
         w = pg.GraphicsLayoutWidget()
