@@ -33,6 +33,8 @@ MAX_STEP_RAD = 30 * 2 * math.pi
 PREVIEW_MAX_RAD, SPEED_MAX = 1e6, 80
 LEGEND_W, AXIS_W = 130, 70
 
+PI_PASSWORD = "Welcome123"
+DEFAULT_HORIZONS = (20, 20, 20, 5)
 PI_PROJECT_DIR = "/home/pi/MPC_Demonstrator"
 PI_PROGRAM = "mpc_spi"
 PI_SERVER_COMMAND = (f"sudo -S -p '' taskset -c 3 chrt -f 50 "
@@ -125,7 +127,7 @@ class NullSource:
 class PiLink(QC.QObject):
     message = QC.Signal(str)
     changed = QC.Signal()
-    horizons = QC.Signal(int, int, int)
+    horizons = QC.Signal(int, int, int, int)
     T_FIELDS = [f for f in FIELDS if f != "total_us"]
 
     def __init__(self, server_command=PI_SERVER_COMMAND):
@@ -148,7 +150,7 @@ class PiLink(QC.QObject):
         self._thread = threading.Thread(target=self._worker, args=(address, password), daemon=True)
         self._thread.start()
 
-    def rebuild(self, address, password, n, npred, nc):
+    def rebuild(self, address, password, npv, ncv, npi, nci):
         if self.busy or self.building:
             return
         if paramiko is None:
@@ -156,7 +158,7 @@ class PiLink(QC.QObject):
             return
         self.building = True
         self.changed.emit()
-        threading.Thread(target=self._build_worker, args=(address, password, n, npred, nc), daemon=True).start()
+        threading.Thread(target=self._build_worker, args=(address, password, npv, ncv, npi, nci), daemon=True).start()
 
     @staticmethod
     def _split_address(address):
@@ -167,7 +169,7 @@ class PiLink(QC.QObject):
             port = int(p)
         return (user or None), host, port
 
-    def _build_worker(self, address, password, n, npred, nc):
+    def _build_worker(self, address, password, npv, ncv, npi, nci):
         client, why = None, None
         try:
             user, host, port = self._split_address(address)
@@ -176,9 +178,10 @@ class PiLink(QC.QObject):
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             client.connect(host, port=port, username=user, password=password, timeout=8, banner_timeout=8,
                            auth_timeout=8, look_for_keys=False, allow_agent=False)
-            cmd = (rf"sed -i -E 's/^( *constexpr int N +=) *[0-9]+;/\1 {n};/' {PI_SOLVER_V} && "
-                   rf"sed -i -E 's/^( *constexpr int Np +=) *[0-9]+;/\1 {npred};/' {PI_SOLVER_I} && "
-                   rf"sed -i -E 's/^( *constexpr int Nc +=) *[0-9]+;/\1 {nc};/' {PI_SOLVER_I} && "
+            cmd = (rf"sed -i -E 's/^( *constexpr int Np +=) *[0-9]+;/\1 {npv};/' {PI_SOLVER_V} && "
+                   rf"sed -i -E 's/^( *constexpr int Nc +=) *[0-9]+;/\1 {ncv};/' {PI_SOLVER_V} && "
+                   rf"sed -i -E 's/^( *constexpr int Np +=) *[0-9]+;/\1 {npi};/' {PI_SOLVER_I} && "
+                   rf"sed -i -E 's/^( *constexpr int Nc +=) *[0-9]+;/\1 {nci};/' {PI_SOLVER_I} && "
                    f"{PI_BUILD_COMMAND}")
             self.message.emit("Recompiling on the Pi .......")
             chan = client.get_transport().open_session()
@@ -198,7 +201,7 @@ class PiLink(QC.QObject):
             if chan.recv_exit_status() != 0:
                 why = "Build failed: " + (lines[-1] if lines else "unknown error")
             else:
-                why = f"Build finished (N={n}, Np={npred}, Nc={nc}). Connect again."
+                why = f"Build finished (voltage Np={npv}, Nc={ncv}; current Np={npi}, Nc={nci}). Connect again."
         except paramiko.AuthenticationException:
             why = "Wrong user name or password"
         except ValueError:
@@ -301,10 +304,10 @@ class PiLink(QC.QObject):
             self.changed.emit()
         elif line.startswith("I "):
             try:
-                n, npred, nc = (int(x) for x in line.split()[1:4])
+                a, b, c, d = (int(x) for x in line.split()[1:5])
             except ValueError:
                 return
-            self.horizons.emit(n, npred, nc)
+            self.horizons.emit(a, b, c, d)
         elif line.startswith("E "):
             self.message.emit("Pi: " + line[2:])
 
@@ -526,13 +529,13 @@ class MainWindow(QW.QMainWindow):
         return tabs
 
     def _update_matrices_options(self):
-        default_horizons = (self.h_n.value() == 20 and self.h_np.value() == 20 and self.h_nc.value() == 5)
+        current = (self.h_vnp.value(), self.h_vnc.value(), self.h_inp.value(), self.h_inc.value())
+        default_horizons = current == DEFAULT_HORIZONS
         csv_index = self.matrices_src.findText("CSV files")
         self.matrices_src.model().item(csv_index).setEnabled(default_horizons)
-
         if not default_horizons and self.matrices_src.currentIndex() == csv_index:
             self.matrices_src.setCurrentIndex(0)
-
+    
     def _build_params_tab(self):
         page = QW.QWidget()
         self.params_page = page
@@ -584,44 +587,47 @@ class MainWindow(QW.QMainWindow):
         lay = QW.QVBoxLayout(page)
         g = QW.QGroupBox("Horizons (compiled into the controller)")
         f = QW.QFormLayout(g)
-        self.h_n, self.h_np, self.h_nc = QW.QSpinBox(), QW.QSpinBox(), QW.QSpinBox()
-        for s, lo, hi, v in ((self.h_n, 2, 200, 20), (self.h_np, 2, 200, 20), (self.h_nc, 2, 200, 5)):
+        self.h_vnp, self.h_vnc = QW.QSpinBox(), QW.QSpinBox()
+        self.h_inp, self.h_inc = QW.QSpinBox(), QW.QSpinBox()
+        specs = ((self.h_vnp, 2, 200, DEFAULT_HORIZONS[0]), (self.h_vnc, 1, 200, DEFAULT_HORIZONS[1]),
+                 (self.h_inp, 2, 200, DEFAULT_HORIZONS[2]), (self.h_inc, 2, 200, DEFAULT_HORIZONS[3]))
+        for s, lo, hi, v in specs:
             s.setRange(lo, hi)
             s.setValue(v)
-            self.h_n.valueChanged.connect(self._update_matrices_options)
-            self.h_np.valueChanged.connect(self._update_matrices_options)
-            self.h_nc.valueChanged.connect(self._update_matrices_options)
-        self._row(f, "Horizon N (voltage mode)", self.h_n, "Prediction / control horizon of the voltage MPC")
-        self._row(f, "Prediction Np (current mode)", self.h_np, "Prediction horizon of the current MPC")
-        self._row(f, "Control Nc (current mode)", self.h_nc,
+        for s, *_ in specs:
+            s.valueChanged.connect(self._update_matrices_options)
+        self._row(f, "Voltage mode: prediction Np", self.h_vnp, "Prediction horizon of the voltage MPC")
+        self._row(f, "Voltage mode: control Nc", self.h_vnc,
+                  "Control horizon of the voltage MPC\nMust satisfy 1 <= Nc <= Np")
+        self._row(f, "Current mode: prediction Np", self.h_inp, "Prediction horizon of the current MPC")
+        self._row(f, "Current mode: control Nc", self.h_inc,
                   "Control horizon of the current MPC\nMust satisfy 2 <= Nc <= Np")
         self.h_lbl = QW.QLabel("Compiled values appear after connecting")
         f.addRow(self.h_lbl)
         self.rebuild_btn = QW.QPushButton("Apply and recompile on the Pi")
         self.rebuild_btn.setToolTip("Writes the horizons into the solver headers on the Pi and rebuilds\n"
                                     "Only possible while disconnected. Connect again afterwards\n"
-                                    "CSV files will only work with N=20, Np=20, Nc=5 compiled")
+                                    "CSV files only work with voltage Np=20, Nc=5 and current Np=20, Nc=5 compiled")
         self.rebuild_btn.clicked.connect(self.on_rebuild)
         f.addRow(self.rebuild_btn)
         lay.addWidget(g)
         lay.addStretch(1)
         return page
 
-    def _on_horizons(self, n, npred, nc):
-        self.h_n.setValue(n)
-        self.h_np.setValue(npred)
-        self.h_nc.setValue(nc)
-        self.h_lbl.setText(f"Compiled on the Pi: N={n}, Np={npred}, Nc={nc}")
+    def _on_horizons(self, npv, ncv, npi, nci):
+        self.h_vnp.setValue(npv)
+        self.h_vnc.setValue(ncv)
+        self.h_inp.setValue(npi)
+        self.h_inc.setValue(nci)
+        self.h_lbl.setText(f"Compiled on the Pi: voltage Np={npv}, Nc={ncv}; current Np={npi}, Nc={nci}")
 
     def on_rebuild(self):
-        n, npred, nc = self.h_n.value(), self.h_np.value(), self.h_nc.value()
-        if nc > npred:
+        npv, ncv = self.h_vnp.value(), self.h_vnc.value()
+        npi, nci = self.h_inp.value(), self.h_inc.value()
+        if ncv > npv or nci > npi:
             QW.QMessageBox.warning(self, "Horizons", "Nc must be less than or equal to Np.")
             return
-        address = self.ip.text().strip()
-        pwd, ok = QW.QInputDialog.getText(self, "Recompile on the Pi", f"Password for {address}:", QW.QLineEdit.Password)
-        if ok and pwd:
-            self.src.rebuild(address, pwd, n, npred, nc)
+        self.src.rebuild(self.ip.text().strip(), PI_PASSWORD, npv, ncv, npi, nci)
 
     def _mode_key(self):
         return self.mode.currentText().lower()
@@ -798,6 +804,7 @@ class MainWindow(QW.QMainWindow):
         self.value.setEnabled(not cycle)
         self.preview.setEnabled(not running and not speed and not cycle)
 
+    """
     def on_connect(self):
         if self.src.busy:
             self.src.disconnect_from()
@@ -806,6 +813,13 @@ class MainWindow(QW.QMainWindow):
         pwd, ok = QW.QInputDialog.getText(self, "Connect to the Pi", f"Password for {address}:", QW.QLineEdit.Password)
         if ok and pwd:
             self.src.connect_to(address, pwd)
+    """
+
+    def on_connect(self):
+        if self.src.busy:
+            self.src.disconnect_from()
+            return
+        self.src.connect_to(self.ip.text().strip(), PI_PASSWORD)
 
     def _on_link_changed(self):
         c = self.src.connected

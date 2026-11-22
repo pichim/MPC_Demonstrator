@@ -184,7 +184,7 @@ void writer_thread()
     int last_state = -1;
     char buf[256];
     std::fputs("H mpc_server 1\n", stdout);
-    std::printf("I %d %d %d\n", MpcController::N, MpcControllerCurr::Np, MpcControllerCurr::Nc);
+    std::printf("I %d %d %d %d\n", MpcController::Np, MpcController::Nc, MpcControllerCurr::Np, MpcControllerCurr::Nc);
     std::fflush(stdout);
     for (;;) {
         const bool done = g_stop;
@@ -321,7 +321,8 @@ void run(NssSPI &spi)
             } else if (cmd == Cmd::Start && state != RUNNING) {
                 try {
                     run_cfg = cfg;
-                    run_cfg.params.N = MpcController::N;
+                    run_cfg.params.Np = MpcController::Np;
+                    run_cfg.params.Nc = MpcController::Nc;
                     run_cfg.params_curr.Np = MpcControllerCurr::Np;
                     run_cfg.params_curr.Nc = MpcControllerCurr::Nc;
                     const std::string root = g_matrix_root;
@@ -374,7 +375,7 @@ void run(NssSPI &spi)
 
             Eigen::VectorXd rprev;
             if (run_cfg.mode == 1) {
-                rprev.resize(MpcController::N);
+                rprev.resize(MpcController::Np);
             } else {
                 rprev.resize(MpcControllerCurr::Np);
             }
@@ -400,7 +401,7 @@ void run(NssSPI &spi)
                 reference_done = tr >= t_back + planner::CYCLE_SETTLE_S;
             }
             else if (run_cfg.preview) {
-                ref.preview(rprev, MpcController::N, tr);
+                ref.preview(rprev, static_cast<int>(rprev.size()), tr);
                 last_pos_ref = ro.pos_ref;
                 last_vel_ref = 0.0;
                 reference_done = false;

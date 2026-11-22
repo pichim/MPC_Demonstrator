@@ -9,7 +9,8 @@ namespace mpc_prep {
 
 struct Params {
     double Ts = 1e-3;
-    int N = 20;
+    int Np = 20;
+    int Nc = 5;
 
     double L = 1.31e-3;
     double R = 4.532;
@@ -77,20 +78,21 @@ inline Eigen::MatrixXd filterRiccati(const Eigen::MatrixXd &A, const Eigen::Matr
         if (!Hk.allFinite()) break;
         if (diff <= 1e-13 * scale) { converged = true; break; }
     }
-    if (!converged) throw std::runtime_error("Kalman Riccati equation did not converge");
+    if (!converged) throw std::runtime_error("Riccati equation did not converge");
     return Hk;
 }
 
 inline Matrices compute(const Params &p)
 {
-    if (p.N < 2 || p.Ts <= 0 || p.L <= 0 || p.R <= 0 || p.k_m == 0 || p.J_M + p.J_L <= 0 ||
-        p.Rw <= 0 || p.Wslack <= 0 || p.imx <= 0 || p.umx <= 0 || p.b < 0)
+    if (p.Nc < 1 || p.Np < p.Nc || p.Ts <= 0 || p.L <= 0 || p.R <= 0 || p.k_m == 0 ||
+        p.J_M + p.J_L <= 0 || p.Rw <= 0 || p.Wslack <= 0 || p.imx <= 0 || p.umx <= 0 || p.b < 0)
         throw std::invalid_argument("matrices_preparation: invalid parameter");
 
     using Eigen::MatrixXd;
     using Eigen::VectorXd;
 
-    const int N = p.N;
+    const int Np = p.Np;
+    const int Nc = p.Nc;
     const int nx = 3;
     const double J = p.J_M + p.J_L;
 
@@ -107,33 +109,39 @@ inline Matrices compute(const Params &p)
     const VectorXd B = Md.block(0, nx, nx, 1);
     const VectorXd Bd = Md.block(0, nx + 1, nx, 1);
 
-    std::vector<MatrixXd> pw(N);
+    std::vector<MatrixXd> pw(Np);
     pw[0] = MatrixXd::Identity(nx, nx);
-    for (int k = 1; k < N; ++k) pw[k] = A * pw[k - 1];
+    for (int k = 1; k < Np; ++k) pw[k] = A * pw[k - 1];
 
-    MatrixXd Sx(nx * N, nx), Su = MatrixXd::Zero(nx * N, N);
-    VectorXd Su0(nx * N), Sd(nx * N);
+    MatrixXd Sx(nx * Np, nx), SuFull = MatrixXd::Zero(nx * Np, Np);
+    VectorXd Su0(nx * Np), Sd(nx * Np);
     MatrixXd Asum = MatrixXd::Zero(nx, nx);
-    for (int kk = 1; kk <= N; ++kk) {
+    for (int kk = 1; kk <= Np; ++kk) {
         const int r = (kk - 1) * nx;
         Sx.block(r, 0, nx, nx) = A * pw[kk - 1];
         Su0.segment(r, nx) = pw[kk - 1] * B;
         Asum += pw[kk - 1];
         Sd.segment(r, nx) = Asum * Bd;
-        for (int jj = 1; jj < kk; ++jj) Su.block(r, jj - 1, nx, 1) = pw[kk - jj - 1] * B;
+        for (int jj = 1; jj < kk; ++jj) SuFull.block(r, jj - 1, nx, 1) = pw[kk - jj - 1] * B;
     }
 
-    MatrixXd Csel = MatrixXd::Zero(N, nx * N);
-    MatrixXd Qbar = MatrixXd::Zero(nx * N, nx * N);
-    for (int k = 0; k < N; ++k) {
+    MatrixXd Tu = MatrixXd::Zero(Np, Nc);
+    Tu.topLeftCorner(Nc, Nc).setIdentity();
+    for (int i = Nc; i < Np; ++i) Tu(i, Nc - 1) = 1.0;
+
+    const MatrixXd Su = SuFull * Tu;
+
+    MatrixXd Csel = MatrixXd::Zero(Np, nx * Np);
+    MatrixXd Qbar = MatrixXd::Zero(nx * Np, nx * Np);
+    for (int k = 0; k < Np; ++k) {
         Csel(k, nx * k) = 1.0;
         for (int i = 0; i < nx; ++i) Qbar(nx * k + i, nx * k + i) = p.Qdiag(i);
     }
-    const MatrixXd Rwbar = p.Rw * MatrixXd::Identity(N, N);
+    const MatrixXd Rwbar = p.Rw * MatrixXd::Identity(Nc, Nc);
 
-    MatrixXd Dd = MatrixXd::Identity(N, N);
-    for (int i = 1; i < N; ++i) Dd(i, i - 1) = -1.0;
-    VectorXd e1 = VectorXd::Zero(N);
+    MatrixXd Dd = MatrixXd::Identity(Nc, Nc);
+    for (int i = 1; i < Nc; ++i) Dd(i, i - 1) = -1.0;
+    VectorXd e1 = VectorXd::Zero(Nc);
     e1(0) = 1.0;
 
     Matrices m;
@@ -141,11 +149,11 @@ inline Matrices compute(const Params &p)
 
     const MatrixXd SuT_Qbar = Su.transpose() * Qbar;
     const MatrixXd Huu = 2.0 * (SuT_Qbar * Su + Dd.transpose() * Rwbar * Dd);
-    m.H = MatrixXd::Zero(2 * N, 2 * N);
-    m.H.topLeftCorner(N, N) = Huu;
-    m.H.bottomRightCorner(N, N) = 2.0 * p.Wslack * MatrixXd::Identity(N, N);
+    m.H = MatrixXd::Zero(Nc + Np, Nc + Np);
+    m.H.topLeftCorner(Nc, Nc) = Huu;
+    m.H.bottomRightCorner(Np, Np) = 2.0 * p.Wslack * MatrixXd::Identity(Np, Np);
     m.H = 0.5 * (m.H + m.H.transpose());
-    m.H += 1e-9 * m.H.diagonal().maxCoeff() * MatrixXd::Identity(2 * N, 2 * N);
+    m.H += 1e-9 * m.H.diagonal().maxCoeff() * MatrixXd::Identity(Nc + Np, Nc + Np);
 
     m.Fx = 2.0 * SuT_Qbar * Sx;
     m.Fu0 = 2.0 * SuT_Qbar * Su0 - 2.0 * Dd.transpose() * Rwbar * e1;
@@ -156,39 +164,38 @@ inline Matrices compute(const Params &p)
     const MatrixXd CselSx = Csel * Sx;
     const VectorXd CselSu0 = Csel * Su0;
     const VectorXd CselSd = Csel * Sd;
-    const MatrixXd IN = MatrixXd::Identity(N, N);
-    MatrixXd IboxU = MatrixXd::Zero(N - 1, N);
-    IboxU.leftCols(N - 1).setIdentity();
+    const MatrixXd INp = MatrixXd::Identity(Np, Np);
+    const MatrixXd INc = MatrixXd::Identity(Nc, Nc);
 
-    const int MM = 5 * N - 2;
-    m.Aineq = MatrixXd::Zero(MM, 2 * N);
+    const int MM = 3 * Np + 2 * Nc;
+    m.Aineq = MatrixXd::Zero(MM, Nc + Np);
     m.Ex = MatrixXd::Zero(MM, nx);
     m.Eu0 = VectorXd::Zero(MM);
     m.Ed = VectorXd::Zero(MM);
     m.bconst = VectorXd::Zero(MM);
 
     int r = 0;
-    m.Aineq.block(r, 0, N, N) = CselSu;
-    m.Aineq.block(r, N, N, N) = -IN;
-    m.Ex.block(r, 0, N, nx) = -CselSx;
-    m.Eu0.segment(r, N) = -CselSu0;
-    m.Ed.segment(r, N) = -CselSd;
-    m.bconst.segment(r, N).setConstant(p.imx);
-    r += N;
-    m.Aineq.block(r, 0, N, N) = -CselSu;
-    m.Aineq.block(r, N, N, N) = -IN;
-    m.Ex.block(r, 0, N, nx) = CselSx;
-    m.Eu0.segment(r, N) = CselSu0;
-    m.Ed.segment(r, N) = CselSd;
-    m.bconst.segment(r, N).setConstant(p.imx);
-    r += N;
-    m.Aineq.block(r, 0, N - 1, N) = IboxU;
-    m.bconst.segment(r, N - 1).setConstant(p.umx);
-    r += N - 1;
-    m.Aineq.block(r, 0, N - 1, N) = -IboxU;
-    m.bconst.segment(r, N - 1).setConstant(p.umx);
-    r += N - 1;
-    m.Aineq.block(r, N, N, N) = -IN;
+    m.Aineq.block(r, 0, Np, Nc) = CselSu;
+    m.Aineq.block(r, Nc, Np, Np) = -INp;
+    m.Ex.block(r, 0, Np, nx) = -CselSx;
+    m.Eu0.segment(r, Np) = -CselSu0;
+    m.Ed.segment(r, Np) = -CselSd;
+    m.bconst.segment(r, Np).setConstant(p.imx);
+    r += Np;
+    m.Aineq.block(r, 0, Np, Nc) = -CselSu;
+    m.Aineq.block(r, Nc, Np, Np) = -INp;
+    m.Ex.block(r, 0, Np, nx) = CselSx;
+    m.Eu0.segment(r, Np) = CselSu0;
+    m.Ed.segment(r, Np) = CselSd;
+    m.bconst.segment(r, Np).setConstant(p.imx);
+    r += Np;
+    m.Aineq.block(r, 0, Nc, Nc) = INc;
+    m.bconst.segment(r, Nc).setConstant(p.umx);
+    r += Nc;
+    m.Aineq.block(r, 0, Nc, Nc) = -INc;
+    m.bconst.segment(r, Nc).setConstant(p.umx);
+    r += Nc;
+    m.Aineq.block(r, Nc, Np, Np) = -INp;
 
     m.Aaug = MatrixXd::Zero(nx + 1, nx + 1);
     m.Aaug.topLeftCorner(nx, nx) = A;
@@ -213,6 +220,5 @@ inline Matrices compute(const Params &p)
 }
 
 }
-
 
 

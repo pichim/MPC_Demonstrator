@@ -8,31 +8,39 @@
 #include <algorithm>
 
 namespace mpc_fixed {
-    constexpr int N   = 20;
+    constexpr int Np  = 20;
+    constexpr int Nc  = 20;
     constexpr int NX  = 3;
     constexpr int NXA = 4;
-    constexpr int NN  = 2*N;
-    constexpr int MM  = 5*N - 2;
-    constexpr int NR  = 3*N;
+    constexpr int NN  = Nc + Np;
+    constexpr int MM  = 3 * Np + 2 * Nc;
+    constexpr int NR  = 3 * Np;
+    static_assert(Nc >= 1, "Control horizon must be >= 1");
+    static_assert(Nc <= Np, "Control horizon must be <= prediction horizon");
 }
 
 class MpcController {
 public:
-    static constexpr int N   = mpc_fixed::N;
+    static constexpr int Np  = mpc_fixed::Np;
+    static constexpr int Nc  = mpc_fixed::Nc;
     static constexpr int NX  = mpc_fixed::NX;
     static constexpr int NXA = mpc_fixed::NXA;
     static constexpr int NN  = mpc_fixed::NN;
     static constexpr int MM  = mpc_fixed::MM;
     static constexpr int NR  = mpc_fixed::NR;
 
-    using MatU   = Eigen::Matrix<double, N, N>;
-    using VecS   = Eigen::Matrix<double, N, 1>;
+    using MatU   = Eigen::Matrix<double, Nc, Nc>;
+    using MatB   = Eigen::Matrix<double, Nc, Np>;
+    using VecU   = Eigen::Matrix<double, Nc, 1>;
+    using VecS   = Eigen::Matrix<double, Np, 1>;
+    using VecR   = Eigen::Matrix<double, Np, 1>;
     using VecN   = Eigen::Matrix<double, NN, 1>;
     using VecM   = Eigen::Matrix<double, MM, 1>;
     using VecXA  = Eigen::Matrix<double, NXA, 1>;
     using VecX   = Eigen::Matrix<double, NX, 1>;
     using VecP   = Eigen::Matrix<double, NX + 2, 1>;
-    using MatFf  = Eigen::Matrix<double, N, NX + 2>;
+    using MatFf  = Eigen::Matrix<double, Nc, NX + 2>;
+    using MatFr  = Eigen::Matrix<double, Nc, Np>;
     using MatEb  = Eigen::Matrix<double, MM, NX + 2>;
     using MatAcl = Eigen::Matrix<double, NXA, NXA>;
     using MatLg  = Eigen::Matrix<double, NXA, 2>;
@@ -58,14 +66,16 @@ public:
         auto check = [](const char* name, int r, int c, int er, int ec) {
             if (r != er || c != ec)
                 throw std::invalid_argument(std::string("MpcController: ") + name +
-                    " has wrong size for compiled-in N=" + std::to_string(N));
+                    " has dimension " + std::to_string(r) + "x" + std::to_string(c) +
+                    " but expected " + std::to_string(er) + "x" + std::to_string(ec) +
+                    " for compiled-in Np=" + std::to_string(Np) + ", Nc=" + std::to_string(Nc));
         };
         check("H", (int)H_.rows(), (int)H_.cols(), NN, NN);
         check("Aineq", (int)Aineq_.rows(), (int)Aineq_.cols(), MM, NN);
-        check("Fx", (int)Fx_.rows(), (int)Fx_.cols(), N, NX);
-        check("Fu0", (int)Fu0_.size(), 1, N, 1);
-        check("Fd", (int)Fd_.size(), 1, N, 1);
-        check("Fr", (int)Fr_.rows(), (int)Fr_.cols(), N, NR);
+        check("Fx", (int)Fx_.rows(), (int)Fx_.cols(), Nc, NX);
+        check("Fu0", (int)Fu0_.size(), 1, Nc, 1);
+        check("Fd", (int)Fd_.size(), 1, Nc, 1);
+        check("Fr", (int)Fr_.rows(), (int)Fr_.cols(), Nc, NR);
         check("Ex", (int)Ex_.rows(), (int)Ex_.cols(), MM, NX);
         check("Eu0", (int)Eu0_.size(), 1, MM, 1);
         check("Ed", (int)Ed_.size(), 1, MM, 1);
@@ -76,23 +86,23 @@ public:
         check("Lgain", (int)Lgain_.rows(), (int)Lgain_.cols(), NXA, 2);
 
         Eigen::MatrixXd H = H_, A = Aineq_;
-        double twoWslack = H(N, N);
+        double twoWslack = H(Nc, Nc);
         if (twoWslack > 0.0) {
             double wslack = twoWslack / 2.0;
             double sscale = std::sqrt(wslack);
-            H.block(N, N, N, N) /= wslack;
-            A.block(0, N, MM, N) /= sscale;
+            H.block(Nc, Nc, Np, Np) /= wslack;
+            A.block(0, Nc, MM, Np) /= sscale;
         }
 
         const double eps = 1e-12;
-        if (H.topRightCorner(N, N).cwiseAbs().maxCoeff() > eps)
+        if (H.topRightCorner(Nc, Np).cwiseAbs().maxCoeff() > eps)
             throw std::invalid_argument("MpcController: H couples u and slack (unsupported)");
-        Eigen::MatrixXd Hss = H.bottomRightCorner(N, N);
+        Eigen::MatrixXd Hss = H.bottomRightCorner(Np, Np);
         Eigen::MatrixXd HssD = Hss.diagonal().asDiagonal();
         if ((Hss - HssD).cwiseAbs().maxCoeff() > eps)
             throw std::invalid_argument("MpcController: slack block of H not diagonal (unsupported)");
 
-        Eigen::MatrixXd Hu_ = H.topLeftCorner(N, N);
+        Eigen::MatrixXd Hu_ = H.topLeftCorner(Nc, Nc);
         Hu = 0.5 * (Hu_ + Hu_.transpose());
         hs = Hss.diagonal();
         HuReg = Hu + REG * MatU::Identity();
@@ -103,19 +113,19 @@ public:
         sVal.assign(MM, 0.0);
         for (int i = 0; i < MM; ++i) {
             rowPtr[i] = (int)uIdx.size();
-            for (int j = 0; j < N; ++j)
+            for (int j = 0; j < Nc; ++j)
                 if (std::abs(A(i, j)) > eps) { uIdx.push_back(j); uVal.push_back(A(i, j)); }
             int ns = 0;
-            for (int j = N; j < NN; ++j)
+            for (int j = Nc; j < NN; ++j)
                 if (std::abs(A(i, j)) > eps) {
                     if (++ns > 1)
                         throw std::invalid_argument("MpcController: a constraint row has >1 slack entry (unsupported)");
-                    sCol[i] = j - N; sVal[i] = A(i, j);
+                    sCol[i] = j - Nc; sVal[i] = A(i, j);
                 }
         }
         rowPtr[MM] = (int)uIdx.size();
 
-        for (int k = 0; k < N; ++k) Frp.col(k) = Fr_.col(3*k + 2);
+        for (int k = 0; k < Np; ++k) Frp.col(k) = Fr_.col(3 * k + 2);
         Ff.template leftCols<NX>() = Fx_;
         Ff.col(NX)     = Fu0_;
         Ff.col(NX + 1) = Fd_;
@@ -142,11 +152,7 @@ public:
         int fault;
     };
 
-    // One-sample delay: the command computed here is applied one sample later.
-    //   xhat   = x_hat(k|k-1)   (stored)
-    //   xn     = x_hat(k+1|k) = Acl*xhat + Baug*u_{k-1} + L*y_k
-    //   QP starts from xn (state at the time u_k starts acting), u_old = u_{k-1}
-    Result step(const Eigen::Vector2d& xmeas, const VecS& rref) {
+    Result step(const Eigen::Vector2d& xmeas, const VecR& rref) {
         Result out;
         out.status = 0; out.iters = 0; out.fault = 0;
 
@@ -160,10 +166,8 @@ public:
             return out;
         }
 
-        // Previous command (the one that acts during the next sample interval).
         const double u_old = u_prev_valid;
 
-        // Observer update FIRST, with the previous command and the newest measurement.
         const VecXA xn = Acl * xhat + Baug * u_old + Lgain * xmeas;
         if (!xn.allFinite()) {
             fallback(out);
@@ -175,8 +179,8 @@ public:
         p << xn.template head<NX>(), u_old, xn(NX);
 
         VecN f;
-        f.template head<N>() = Ff * p + Frp * rref;
-        f.template tail<N>().setZero();
+        f.template head<Nc>() = Ff * p + Frp * rref;
+        f.template tail<Np>().setZero();
         VecM bineq = bconst + Eb * p;
 
         if (!f.allFinite() || !bineq.allFinite()) {
@@ -186,10 +190,10 @@ public:
         }
 
         VecN z0;
-        z0.template head<N - 1>() = z_prev.template segment<N - 1>(1);
-        z0(N - 1)                 = z_prev(N - 1);
-        z0.template segment<N - 1>(N) = z_prev.template segment<N - 1>(N + 1);
-        z0(NN - 1)                    = z_prev(NN - 1);
+        for (int i = 0; i < Nc - 1; ++i) z0(i) = z_prev(i + 1);
+        z0(Nc - 1) = z_prev(Nc - 1);
+        for (int i = 0; i < Np - 1; ++i) z0(Nc + i) = z_prev(Nc + i + 1);
+        z0(NN - 1) = z_prev(NN - 1);
 
         int status, iters;
         VecN z = qpSolveIPM(f, bineq, z0, status, iters);
@@ -217,7 +221,7 @@ public:
         u_apply = std::min(std::max(u_apply, -umx), umx);
         u_prev_valid = u_apply;
 
-        xhat = xn;   // already checked finite above
+        xhat = xn;
 
         out.u_apply = u_apply;
         out.xhat = xhat;
@@ -225,14 +229,14 @@ public:
     }
 
     Result step(const Eigen::Vector2d& xmeas, double theta_ref) {
-        return step(xmeas, VecS::Constant(theta_ref));
+        return step(xmeas, VecR::Constant(theta_ref));
     }
 
 private:
     MatU  Hu, HuReg;
     VecS  hs, hsReg;
     MatFf Ff;
-    MatU  Frp;
+    MatFr Frp;
     MatEb Eb;
     VecM  bconst;
     MatAcl Acl;
@@ -248,7 +252,8 @@ private:
     double u_prev_valid;
     int fail_count;
 
-    MatU S, B;
+    MatU S;
+    MatB B;
     VecS D, Dinv;
     Eigen::LLT<MatU>  llt;
     Eigen::LDLT<MatU> ldlt;
@@ -273,7 +278,7 @@ private:
         for (int i = 0; i < MM; ++i) {
             double acc = 0.0;
             for (int k = rowPtr[i]; k < rowPtr[i + 1]; ++k) acc += uVal[k] * zp[uIdx[k]];
-            if (sCol[i] >= 0) acc += sVal[i] * zp[N + sCol[i]];
+            if (sCol[i] >= 0) acc += sVal[i] * zp[Nc + sCol[i]];
             out(i) = acc;
         }
     }
@@ -283,7 +288,7 @@ private:
         for (int i = 0; i < MM; ++i) {
             const double vi = v(i);
             for (int k = rowPtr[i]; k < rowPtr[i + 1]; ++k) op[uIdx[k]] += uVal[k] * vi;
-            if (sCol[i] >= 0) op[N + sCol[i]] += sVal[i] * vi;
+            if (sCol[i] >= 0) op[Nc + sCol[i]] += sVal[i] * vi;
         }
     }
 
@@ -307,7 +312,7 @@ private:
             }
         }
         Dinv = D.cwiseInverse();
-        MatU Bs = B * Dinv.cwiseSqrt().asDiagonal();
+        MatB Bs = B * Dinv.cwiseSqrt().asDiagonal();
         S.template selfadjointView<Eigen::Lower>().rankUpdate(Bs, -1.0);
 
         llt.compute(S);
@@ -316,13 +321,13 @@ private:
     }
 
     VecN solveK(const VecN& r) const {
-        const VecS rs = r.template tail<N>();
-        const VecS rhs = r.template head<N>() - B * rs.cwiseProduct(Dinv);
-        VecS xu = useLDLT ? VecS(ldlt.solve(rhs)) : VecS(llt.solve(rhs));
+        const VecS rs = r.template tail<Np>();
+        const VecU rhs = r.template head<Nc>() - B * rs.cwiseProduct(Dinv);
+        VecU xu = useLDLT ? VecU(ldlt.solve(rhs)) : VecU(llt.solve(rhs));
         VecS xs = (rs - B.transpose() * xu).cwiseProduct(Dinv);
         VecN x;
-        x.template head<N>() = xu;
-        x.template tail<N>() = xs;
+        x.template head<Nc>() = xu;
+        x.template tail<Np>() = xs;
         return x;
     }
 
@@ -350,8 +355,8 @@ private:
 
             mulA(z, Az);
             mulAT(lam, ATl);
-            rd.template head<N>() = Hu * z.template head<N>() + f.template head<N>() + ATl.template head<N>();
-            rd.template tail<N>() = hs.cwiseProduct(z.template tail<N>()) + f.template tail<N>() + ATl.template tail<N>();
+            rd.template head<Nc>() = Hu * z.template head<Nc>() + f.template head<Nc>() + ATl.template head<Nc>();
+            rd.template tail<Np>() = hs.cwiseProduct(z.template tail<Np>()) + f.template tail<Np>() + ATl.template tail<Np>();
             rp = Az + w - b;
             const double mu = w.dot(lam) / MM;
 
