@@ -135,6 +135,8 @@ public:
         bconst = bconst_;
 
         Lgain  = Lgain_;
+        Cm     = Caug_;
+        Mgain  = Aaug_.inverse() * Lgain_;
         Acl    = Aaug_ - Lgain_ * Caug_;
         Baug   = Baug_;
 
@@ -169,14 +171,17 @@ public:
         const double u_old = u_prev_valid;
 
         const VecXA xn = Acl * xhat + Baug * u_old + Lgain * xmeas;
-        if (!xn.allFinite()) {
-            fallback(out);
-            out.xhat = xhat;
-            return out;
+        const VecXA xf = xhat + Mgain * (xmeas - Cm * xhat);
+
+        if (!xn.allFinite() || !xf.allFinite()) { 
+            fallback(out); 
+            out.xhat = xhat; 
+            return out; 
         }
 
         VecP p;
-        p << xn.template head<NX>(), u_old, xn(NX);
+        //p << xn.template head<NX>(), u_old, xn(NX);
+        p << xf.template head<NX>(), u_old, xf(NX);
 
         VecN f;
         f.template head<Nc>() = Ff * p + Frp * rref;
@@ -242,6 +247,8 @@ private:
     MatAcl Acl;
     VecXA Baug;
     MatLg Lgain;
+    MatLg Mgain;                         
+    Eigen::Matrix<double, 2, NXA> Cm;
     double umx;
 
     std::vector<int>    rowPtr, uIdx, sCol;
