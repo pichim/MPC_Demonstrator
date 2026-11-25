@@ -45,6 +45,10 @@ PI_BUILD_COMMAND = (f"cd {PI_PROJECT_DIR} && cmake -S host -B host/build -DCMAKE
                     f"cmake --build host/build -j2")
 PING_PERIOD_S = 0.25
 
+PI_ETH_HOST = "192.168.50.1"  
+PROBE_TIMEOUT_S = 4.0           
+ETH_WAIT_S = 20.0 
+
 IMX_DEFAULT = {"voltage": 1.0, "current": 1.5}
 
 PARAM_GROUPS = [
@@ -128,6 +132,7 @@ class PiLink(QC.QObject):
     message = QC.Signal(str)
     changed = QC.Signal()
     horizons = QC.Signal(int, int, int, int)
+    failed = QC.Signal(str)
     T_FIELDS = [f for f in FIELDS if f != "total_us"]
 
     def __init__(self, server_command=PI_SERVER_COMMAND):
@@ -138,8 +143,9 @@ class PiLink(QC.QObject):
                          params=dict(matrices="gui", values={}))
         self._lock = threading.Lock()
         self._samples, self._chan, self._closing, self._thread = [], None, False, None
+        self._via = ""
 
-    def connect_to(self, address, password):
+    def connect_to(self, address, password, link="wifi"):
         if self.busy or self.building:
             return
         if paramiko is None:
@@ -147,10 +153,10 @@ class PiLink(QC.QObject):
             return
         self.busy, self._closing = True, False
         self.changed.emit()
-        self._thread = threading.Thread(target=self._worker, args=(address, password), daemon=True)
+        self._thread = threading.Thread(target=self._worker, args=(address, password, link), daemon=True)
         self._thread.start()
 
-    def rebuild(self, address, password, npv, ncv, npi, nci):
+    def rebuild(self, address, password, npv, ncv, npi, nci, link="wifi"):
         if self.busy or self.building:
             return
         if paramiko is None:
@@ -158,7 +164,7 @@ class PiLink(QC.QObject):
             return
         self.building = True
         self.changed.emit()
-        threading.Thread(target=self._build_worker, args=(address, password, npv, ncv, npi, nci), daemon=True).start()
+        threading.Thread(target=self._build_worker, args=(address, password, npv, ncv, npi, nci, link), daemon=True).start()
 
     @staticmethod
     def _split_address(address):
@@ -169,10 +175,34 @@ class PiLink(QC.QObject):
             port = int(p)
         return (user or None), host, port
 
-    def _build_worker(self, address, password, npv, ncv, npi, nci):
+    @staticmethod
+    def _reachable(host, port, wait_s):
+        end = time.monotonic() + wait_s
+        while True:
+            try:
+                with socket.create_connection((host, port), timeout=PROBE_TIMEOUT_S):
+                    return True
+            except OSError:
+                if time.monotonic() >= end:
+                    return False
+                time.sleep(0.5)
+
+    def _pick_target(self, address, link):
+        user, host, port = self._split_address(address)
+        if link == "ethernet":
+            self.message.emit(f"Looking for the Pi on the cable ({PI_ETH_HOST}) ...")
+            if self._reachable(PI_ETH_HOST, port, ETH_WAIT_S):
+                return user, PI_ETH_HOST, port, "Ethernet cable"
+            raise ConnectionError(f"Pi not reachable over the cable ({PI_ETH_HOST}). Check cable, Ethernet config and Pi power")
+        self.message.emit(f"Looking for the Pi on the network ({host}) ...")
+        if self._reachable(host, port, 0):
+            return user, host, port, "Wi-Fi"
+        raise ConnectionError("Pi not found on this network")
+
+    def _build_worker(self, address, password, npv, ncv, npi, nci, link):
         client, why = None, None
         try:
-            user, host, port = self._split_address(address)
+            user, host, port, _ = self._pick_target(address, link)
             self.message.emit(f"Connecting to {host} ...")
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -218,10 +248,11 @@ class PiLink(QC.QObject):
             self.message.emit(why or "Build finished")
             self.changed.emit()
 
-    def _worker(self, address, password):
+    def _worker(self, address, password, link):
         client, why = None, None
         try:
-            user, host, port = self._split_address(address)
+            user, host, port, via = self._pick_target(address, link)
+            self._via = f"{via} ({host})"
             self.message.emit(f"Connecting to {host} ...")
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -247,8 +278,11 @@ class PiLink(QC.QObject):
                     client.close()
             except Exception:
                 pass
+            was_connected = self.connected
             self._chan, self.connected, self.state, self.busy = None, False, "DISCONNECTED", False
             self.message.emit(why or "Disconnected")
+            if why and not was_connected:
+                self.failed.emit(why)
             self.changed.emit()
 
     def _session(self, chan):
@@ -300,7 +334,7 @@ class PiLink(QC.QObject):
             with self._lock:
                 self._samples.clear()
             self.connected, self.state = True, "IDLE"
-            self.message.emit("Connected")
+            self.message.emit(f"Connected via {self._via}" if self._via else "Connected")
             self.changed.emit()
         elif line.startswith("I "):
             try:
@@ -392,6 +426,7 @@ class MainWindow(QW.QMainWindow):
             self.src.message.connect(self.statusBar().showMessage)
             self.src.changed.connect(self._on_link_changed)
             self.src.horizons.connect(self._on_horizons)
+            self.src.failed.connect(self._on_connect_failed)
             self.statusBar().showMessage("Not connected")
         else:
             self.statusBar().showMessage("Offline mode")
@@ -428,10 +463,15 @@ class MainWindow(QW.QMainWindow):
         g = QW.QGroupBox("Connection")
         f = QW.QFormLayout(g)
         self.ip = QW.QLineEdit("pi@clt-lab-t-5086")
+        self.link = QW.QComboBox()
+        self.link.addItems(["WiFi", "Cable"])
         self.conn_btn = QW.QPushButton("Connect")
         self.conn_btn.clicked.connect(self.on_connect)
         self.conn_btn.setToolTip("Connect to the Raspberry Pi")
-        self._row(f, "Pi address", self.ip, "Address of the Raspberry Pi")
+        self._row(f, "Pi address", self.ip, "Address of the Raspberry Pi on the Wi-Fi / network")
+        self._row(f, "Link", self.link,
+            "Wi-Fi: the Pi and this computer are on the same network\n"
+            f"Cable: direct Ethernet connection to the fixed address ({PI_ETH_HOST})")
         f.addRow(self.conn_btn)
         lay.addWidget(g)
 
@@ -607,7 +647,7 @@ class MainWindow(QW.QMainWindow):
         self.rebuild_btn = QW.QPushButton("Apply and recompile on the Pi")
         self.rebuild_btn.setToolTip("Writes the horizons into the solver headers on the Pi and rebuilds\n"
                                     "Only possible while disconnected. Connect again afterwards\n"
-                                    "CSV files only work with voltage Np=20, Nc=5 and current Np=20, Nc=5 compiled")
+                                    "CSV files only work with voltage Np=20, Nc=20 and current Np=20, Nc=5 compiled")
         self.rebuild_btn.clicked.connect(self.on_rebuild)
         f.addRow(self.rebuild_btn)
         lay.addWidget(g)
@@ -627,7 +667,7 @@ class MainWindow(QW.QMainWindow):
         if ncv > npv or nci > npi:
             QW.QMessageBox.warning(self, "Horizons", "Nc must be less than or equal to Np.")
             return
-        self.src.rebuild(self.ip.text().strip(), PI_PASSWORD, npv, ncv, npi, nci)
+        self.src.rebuild(self.ip.text().strip(), PI_PASSWORD, npv, ncv, npi, nci, self._link_key())
 
     def _mode_key(self):
         return self.mode.currentText().lower()
@@ -793,6 +833,7 @@ class MainWindow(QW.QMainWindow):
         self.stop_btn.setEnabled(connected)
         self.estop_btn.setEnabled(connected)
         self.ip.setEnabled(not busy and not building)
+        self.link.setEnabled(not busy and not building)
         if busy and not connected:
             self.conn_btn.setText("Connecting...")
             self.conn_btn.setEnabled(False)
@@ -804,22 +845,22 @@ class MainWindow(QW.QMainWindow):
         self.value.setEnabled(not cycle)
         self.preview.setEnabled(not running and not speed and not cycle)
 
-    """
-    def on_connect(self):
-        if self.src.busy:
-            self.src.disconnect_from()
-            return
-        address = self.ip.text().strip()
-        pwd, ok = QW.QInputDialog.getText(self, "Connect to the Pi", f"Password for {address}:", QW.QLineEdit.Password)
-        if ok and pwd:
-            self.src.connect_to(address, pwd)
-    """
+    def _link_key(self):
+        return ("wifi", "ethernet")[self.link.currentIndex()]
 
     def on_connect(self):
         if self.src.busy:
             self.src.disconnect_from()
             return
-        self.src.connect_to(self.ip.text().strip(), PI_PASSWORD)
+        self.src.connect_to(self.ip.text().strip(), PI_PASSWORD, self._link_key())
+
+    def _on_connect_failed(self, why):
+        text = why
+        if "Pi not" in why:
+            text += ("\n\nRead GUI documentation for Ethernet settings."
+                     if self._link_key() == "ethernet" else
+                     "\n\nCheck that the Pi and this computer are on the same Wi-Fi network.")
+        QW.QMessageBox.warning(self, "Connection failed", text)
 
     def _on_link_changed(self):
         c = self.src.connected
