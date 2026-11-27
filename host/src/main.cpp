@@ -1,7 +1,11 @@
 // Single-threaded SPI baseline, matching python/main.py.
 // Keep aligned with the variables in python/main.py.
+#ifndef SPI_SPEED_HZ
 #define SPI_SPEED_HZ 30000000
+#endif
+#ifndef PERIOD_US
 #define PERIOD_US 1000
+#endif
 #define SETPOINT 0.08f        // A in current mode, V in voltage mode.
 #define MODE 0                // 0: current setpoint, 1: direct voltage.
 #define CURRENT_LIMIT_A 1.0f  // Host current-command limit; keep aligned with Python host.
@@ -20,13 +24,21 @@
 #include <type_traits>
 #include <vector>
 
+#include "monotonic_clock.h"
+#ifdef MPC_USE_CH347
+#include "spi_ch347.h"
+#include <string_view>
+using SpiTransport = Ch347SPI;
+#else
 #include "spi_nss.h"
+using SpiTransport = NssSPI;
+#endif
 
 namespace {
 volatile std::sig_atomic_t stopped = 0;
 void stop(int) { stopped = 1; }
 
-protocol::Measurements send_command(NssSPI &spi, float setpoint, bool enable, int mode = MODE)
+protocol::Measurements send_command(SpiTransport &spi, float setpoint, bool enable, int mode = MODE)
 {
     // Reply is prepared before receipt of this command; not an application ACK.
     return protocol::decode(spi.transfer(
@@ -80,7 +92,7 @@ static_assert((MODE == 0 || MODE == 1) && CURRENT_LIMIT_A > 0.0f &&
                   VOLTAGE_LIMIT_V <= std::numeric_limits<float>::max(),
               "Invalid mode/command limits");
 
-void run(NssSPI &spi, Log &log)
+void run(SpiTransport &spi, Log &log, bool allow_enable = true)
 {
     const auto run_start = monotonic_ns();
     constexpr long long period_ns = PERIOD_US * 1000LL;
@@ -107,15 +119,17 @@ void run(NssSPI &spi, Log &log)
         previous = now;
         if (stopped || log.count == log.spi.size())
             break;
-        // Use these measurements to compute the NEXT exchange's command here.
-        // The first exchange sends zero with enable off; telemetry is not an ACK.
-        mode = MODE;
-        setpoint = SETPOINT;
-        if (!std::isfinite(setpoint))
-            throw std::runtime_error("Non-finite controller setpoint; stopping.");
-        const float limit = mode == 0 ? CURRENT_LIMIT_A : VOLTAGE_LIMIT_V;
-        setpoint = std::clamp(setpoint, -limit, limit);
-        enabled = true;
+        if (allow_enable) {
+            // Use these measurements to compute the NEXT exchange's command here.
+            // The first exchange sends zero with enable off; telemetry is not an ACK.
+            mode = MODE;
+            setpoint = SETPOINT;
+            if (!std::isfinite(setpoint))
+                throw std::runtime_error("Non-finite controller setpoint; stopping.");
+            const float limit = mode == 0 ? CURRENT_LIMIT_A : VOLTAGE_LIMIT_V;
+            setpoint = std::clamp(setpoint, -limit, limit);
+            enabled = true;
+        }
         next_release += period_ns;
         // Keep the original time grid; discard releases crossed during work.
         const auto finished = monotonic_ns();
@@ -165,13 +179,31 @@ void report(const Log &log, double cpu_s, double wall_s)
 }
 } // namespace
 
-int main(int argc, char **)
+int main(int argc, char **argv)
 {
+    bool allow_enable = true;
+#ifdef MPC_USE_CH347
+    const std::string_view option = argc == 2 ? argv[1] : "";
+    if (option != "--disabled" && option != "--enable" && option != "--probe") {
+        std::cerr << "Usage: mpc_spi_usb --probe | --disabled | --enable\n";
+        return 1;
+    }
+    allow_enable = option == "--enable";
+#else
+    (void)argv;
     if (argc != 1) {
         std::cerr << "No run options: edit host/src/main.cpp and rebuild.\n";
         return 1;
     }
+#endif
     try {
+#ifdef MPC_USE_CH347
+        if (option == "--probe") {
+            SpiTransport spi(SPI_SPEED_HZ);
+            std::cout << "CH347T SPI configured in mode 0 at " << SPI_SPEED_HZ << " Hz.\n";
+            return 0;
+        }
+#endif
         struct sigaction action{};
         action.sa_handler = stop;
         sigemptyset(&action.sa_mask);
@@ -182,11 +214,11 @@ int main(int argc, char **)
         double cpu_s, wall_s;
         std::exception_ptr failure;
         {
-            NssSPI spi(SPI_SPEED_HZ);
+            SpiTransport spi(SPI_SPEED_HZ);
             const auto wall_start = monotonic_ns();
             const auto cpu_start = std::clock();
             try {
-                run(spi, log);
+                run(spi, log, allow_enable);
             } catch (...) {
                 failure = std::current_exception();
                 status = 1;

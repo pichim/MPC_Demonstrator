@@ -1,8 +1,9 @@
 # MPC Demonstrator
 
-Raspberry Pi SPI master and NUCLEO-F446RE firmware for a future MPC controller.
-The Pi exchanges a command and telemetry in one full-duplex SPI transaction per
-cycle, then computes the next command (currently a fixed test setpoint).
+SPI hosts and NUCLEO-F446RE firmware for a future MPC controller. The
+Raspberry Pi and optional Ubuntu laptop hosts exchange a command and telemetry
+in one full-duplex SPI transaction per cycle, then prepare the next command
+(currently a fixed test setpoint).
 The MCU runs a motor task every **50 µs**, selecting either current
 control or direct voltage. Only the motor is used; there is no pendulum path.
 
@@ -81,6 +82,12 @@ resolved at configure time.
 Pi SPI0 must be enabled (`dtparam=spi=on` in the active boot `config.txt`) and
 `/dev/spidev0.0` present. No custom kernel or device-tree overlay is required.
 Run **only one client at a time**.
+
+For an Ubuntu laptop and a Waveshare CH347T USB-to-SPI adapter, see the
+[laptop host setup](docs/LAPTOP_HOST.md) and its
+[real-time FIFO test](docs/LAPTOP_HOST.md#real-time-fifo-test).
+The laptop has passed disabled-command communication tests. Replacing the Pi
+for powered motor control or MPC remains unverified.
 
 Build C++ from the repository root:
 
