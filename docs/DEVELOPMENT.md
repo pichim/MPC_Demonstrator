@@ -1,23 +1,25 @@
 # Communication development and validation record
 
-This is the consolidated record of the SPI experiments on the Raspberry Pi 5
-and NUCLEO-F446RE, including timing experiments through 2026-10-30 and the
-single-exchange host validation. It includes unsuccessful experiments and unresolved
-cases. The board has no motor or sensor hardware attached; output
-register checks are not physical actuator tests. See [README](../README.md) for
-current build/run instructions; historical commands below require their matching
-firmware and clients.
+This record covers SPI experiments with the Raspberry Pi 5, the Ubuntu laptop
+host, and the NUCLEO-F446RE through the five-minute comparison on 2026-11-27.
+It includes unsuccessful experiments and unresolved cases. The reported bench
+tests used a Nucleo without a motor or sensors attached. Output register
+checks do not establish physical actuator behavior. The [README](../README.md)
+has current build and run instructions. Historical commands below require
+their matching firmware and clients.
 
 ## Current baseline
 
-Both hosts retain 1 kHz fixed monotonic scheduling and 18-byte CRC-8 frames, with
+Both Pi hosts retain 1 kHz fixed monotonic scheduling and 18-byte CRC-8 frames, with
 one NSS-framed COMMAND/telemetry exchange per cycle. The received telemetry feeds
 the next cycle's command; the first exchange is disabled. This supersedes the
 READ → compute → COMMAND host sequence in commit `ba9dc97`.
 The MCU motor task runs every 50 µs; a separate worker handles SPI recovery.
-See the single-exchange validation below and the root README for
-current settings and commands. Earlier sections preserve checkpoint-specific
-behavior, paths, test counts and measurements; they are not current instructions.
+See the single-exchange validation below and the root README for current
+settings and commands. The [five-minute Pi 5 and laptop comparison](#pi-laptop-comparison)
+records the optional laptop transport tested from `waveshare`. The historical
+sections preserve the behavior, paths, test counts, and measurements of each
+checkpoint.
 
 ## CPU-core isolation — 2026-09-28 (historical checkpoint)
 
@@ -45,16 +47,16 @@ Reviewed its final-state difference against `127ce2b` and the fixes below, rathe
 than treating intermediate experiments as current design. 365 files are unchanged
 moves; inherited utility/Eigen code was preserved. The main changes are:
 
-| Area | Original SPI port | Current handover version |
-| --- | --- | --- |
-| Layout/build | MCU at root, Python under `python/` | Separate `mcu/`, `host/`, `docs/`; independent builds; VS Code targets MCU |
-| Host exchange | Python ARM → delay → COMMAND, 5 MHz, 500 Hz | Matching Python/C++ READ → compute → COMMAND, 30 MHz, 1 kHz; kernel NSS setup and enforced inactive interval |
-| Firmware ownership | 200 µs intermediary task plus 50 µs current task, mutex-shared state | 50 µs `MotorControlThread` owns sensors/control/enable; atomic latest-command mailbox; SPI recovery worker |
-| SPI recovery | ARM/worker-driven preparation | NSS edges frame immutable DMA buffers; length/CRC/header/DMA checks, bounded IRQ reset and worker fallback/timeout |
-| Commands | Current/enable/reserved, 14 bytes | Current or voltage/enable/mode/reserved, 18 bytes; receipt-based 300 ms expiry |
-| Motor signals | Motor/pendulum positions and current | Motor-only voltage/current/position/velocity; optional position notch; count-derived velocity with 100 Hz LP and notch |
-| Control | Current PID, 500 Hz reference LP, fixed 2 V compensation | Original gains/LP retained; initialized live handover; direct voltage mode; configurable compensation defaults to zero; limits ±1 A/±24 V in hosts, voltage saturation in MCU |
-| Logging | Unbounded run, live terminal windows | Rounded finite cycle count; preallocated data/timing buffers; CSV after disable/close; MATLAB/Python import and weighted statistics/p99 |
+| Area               | Original SPI port                                                    | Current handover version                                                                                                                                                      |
+| ------------------ | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Layout/build       | MCU at root, Python under `python/`                                  | Separate `mcu/`, `host/`, `docs/`; independent builds; VS Code targets MCU                                                                                                    |
+| Host exchange      | Python ARM → delay → COMMAND, 5 MHz, 500 Hz                          | Matching Python/C++ READ → compute → COMMAND, 30 MHz, 1 kHz; kernel NSS setup and enforced inactive interval                                                                  |
+| Firmware ownership | 200 µs intermediary task plus 50 µs current task, mutex-shared state | 50 µs `MotorControlThread` owns sensors/control/enable; atomic latest-command mailbox; SPI recovery worker                                                                    |
+| SPI recovery       | ARM/worker-driven preparation                                        | NSS edges frame immutable DMA buffers; length/CRC/header/DMA checks, bounded IRQ reset and worker fallback/timeout                                                            |
+| Commands           | Current/enable/reserved, 14 bytes                                    | Current or voltage/enable/mode/reserved, 18 bytes; receipt-based 300 ms expiry                                                                                                |
+| Motor signals      | Motor/pendulum positions and current                                 | Motor-only voltage/current/position/velocity; optional position notch; count-derived velocity with 100 Hz LP and notch                                                        |
+| Control            | Current PID, 500 Hz reference LP, fixed 2 V compensation             | Original gains/LP retained; initialized live handover; direct voltage mode; configurable compensation defaults to zero; limits ±1 A/±24 V in hosts, voltage saturation in MCU |
+| Logging            | Unbounded run, live terminal windows                                 | Rounded finite cycle count; preallocated data/timing buffers; CSV after disable/close; MATLAB/Python import and weighted statistics/p99                                       |
 
 Two numeric failure cases were reproduced and fixed during this review:
 
@@ -102,12 +104,12 @@ to the flashed/tested image:
 Final timings: core 3, FIFO 50, 30 MHz; 20,000 current-mode cycles and 5,000
 voltage-mode cycles per host. Values are ms; CPU is percent of one core.
 
-| Client / mode | dt min | dt mean | dt p99 | dt max | SPI min | SPI mean | SPI p99 | SPI max | CPU |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| C++ current | 0.8707 | 1.0015 | 1.0076 | 1.1982 | 0.1515 | 0.1594 | 0.1659 | 0.3357 | 5.51% |
-| C++ voltage | 0.9869 | 1.0015 | 1.0072 | 1.0384 | 0.1513 | 0.1593 | 0.1644 | 0.1949 | 5.50% |
-| Python current | 0.2263 | 1.0024 | 1.0145 | 1.8750 | 0.1613 | 0.1672 | 0.1780 | 0.9903 | 6.59% |
-| Python voltage | 0.9376 | 1.0022 | 1.0092 | 1.0571 | 0.1616 | 0.1669 | 0.1727 | 0.2362 | 6.55% |
+| Client / mode  | dt min | dt mean | dt p99 | dt max | SPI min | SPI mean | SPI p99 | SPI max |   CPU |
+| -------------- | -----: | ------: | -----: | -----: | ------: | -------: | ------: | ------: | ----: |
+| C++ current    | 0.8707 |  1.0015 | 1.0076 | 1.1982 |  0.1515 |   0.1594 |  0.1659 |  0.3357 | 5.51% |
+| C++ voltage    | 0.9869 |  1.0015 | 1.0072 | 1.0384 |  0.1513 |   0.1593 |  0.1644 |  0.1949 | 5.50% |
+| Python current | 0.2263 |  1.0024 | 1.0145 | 1.8750 |  0.1613 |   0.1672 |  0.1780 |  0.9903 | 6.59% |
+| Python voltage | 0.9376 |  1.0022 | 1.0092 | 1.0571 |  0.1616 |   0.1669 |  0.1727 |  0.2362 | 6.55% |
 
 Artifacts: `/tmp/mpc-baseline-review-EaFauI/`. No test framework or generated logs
 were added to the repository. These results do not establish hard deadlines; the
@@ -146,12 +148,12 @@ for both clients: exit zero, partial CSV and zero-voltage telemetry afterward.
 Host timing used core 3, FIFO 50, 30 MHz SPI, without concurrent builds. Times are
 ms, CPU is percentage of one core; these are observations, not deadline guarantees.
 
-| Client / mode | dt min | dt mean | dt p99 | dt max | SPI min | SPI mean | SPI p99 | SPI max | CPU |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| C++ current | 0.9088 | 1.0015 | 1.0095 | 1.1272 | 0.1531 | 0.1596 | 0.1675 | 0.2758 | 5.52% |
-| C++ voltage | 0.9610 | 1.0014 | 1.0076 | 1.0562 | 0.1505 | 0.1593 | 0.1636 | 0.2041 | 5.49% |
-| Python current | 0.8467 | 1.0023 | 1.0149 | 1.1911 | 0.1609 | 0.1674 | 0.1809 | 0.3433 | 6.60% |
-| Python voltage | 0.9369 | 1.0022 | 1.0076 | 1.0861 | 0.1594 | 0.1670 | 0.1727 | 0.2483 | 6.55% |
+| Client / mode  | dt min | dt mean | dt p99 | dt max | SPI min | SPI mean | SPI p99 | SPI max |   CPU |
+| -------------- | -----: | ------: | -----: | -----: | ------: | -------: | ------: | ------: | ----: |
+| C++ current    | 0.9088 |  1.0015 | 1.0095 | 1.1272 |  0.1531 |   0.1596 |  0.1675 |  0.2758 | 5.52% |
+| C++ voltage    | 0.9610 |  1.0014 | 1.0076 | 1.0562 |  0.1505 |   0.1593 |  0.1636 |  0.2041 | 5.49% |
+| Python current | 0.8467 |  1.0023 | 1.0149 | 1.1911 |  0.1609 |   0.1674 |  0.1809 |  0.3433 | 6.60% |
+| Python voltage | 0.9369 |  1.0022 | 1.0076 | 1.0861 |  0.1594 |   0.1670 |  0.1727 |  0.2483 | 6.55% |
 
 Remaining findings: the clean configure emits existing schema warnings about the
 STORAGE/SD list overrides and ignores the undefined `sd.init-frequency` setting.
@@ -491,6 +493,7 @@ budget. No MPC computation or physical sample-to-actuation measurement is includ
 5. [External project and vendor/kernel research](#research)
 6. [Architecture checkpoints and earlier acceptance checks](#checkpoints)
 7. [Student cleanup and final review](#student-cleanup)
+8. [Five-minute Pi 5 and laptop comparison](#pi-laptop-comparison)
 
 Sections 2–6 are historical records, preserved with their original figures and
 limitations. Words such as “current”, “next” or “remains flashed” in those sections
@@ -1725,11 +1728,11 @@ Times below are µs. Percentiles pool samples across repetitions. Rate is measur
 between first and last starts, averaged over runs; CPU is mean percentage of one
 core. Startup is excluded from release-lateness and interval distributions.
 
-| Variant | Effective Hz | Mean SPI | p99 SPI | p99 completion interval | Max completion interval | p99 release lateness | CPU |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| baseline | 3979.647 | 158.964 | 160.593 | 252.741 | 309.981 | 1.722 | 21.48% |
-| absolute | 4000.000 | 158.968 | 160.186 | 251.056 | 272.871 | 1.732 | 21.61% |
-| timerfd | 4000.002 | 159.028 | 160.814 | 251.315 | 281.018 | 2.001 | 21.63% |
+| Variant  | Effective Hz | Mean SPI | p99 SPI | p99 completion interval | Max completion interval | p99 release lateness |    CPU |
+| -------- | -----------: | -------: | ------: | ----------------------: | ----------------------: | -------------------: | -----: |
+| baseline |     3979.647 |  158.964 | 160.593 |                 252.741 |                 309.981 |                1.722 | 21.48% |
+| absolute |     4000.000 |  158.968 | 160.186 |                 251.056 |                 272.871 |                1.732 | 21.61% |
+| timerfd  |     4000.002 |  159.028 | 160.814 |                 251.315 |                 281.018 |                2.001 | 21.63% |
 
 The baseline mean completion interval was 251.278 µs; both fixed variants were
 approximately 250.000 µs. Baseline release lateness is relative to its continually
@@ -1802,12 +1805,12 @@ CPU percentage of one core; rate is estimated from rounded completion-interval
 samples, so tiny deviations above exactly 4,000 Hz are not significant.
 All times below are µs.
 
-| Client | Target Hz | Cycles | Effective Hz | Mean SPI | p99 SPI | Max SPI | p99 dt | Max dt | CPU | Skipped releases |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| python | 4000 | 120000 | 3999.9 | 166.3 | 168.8 | 330.5 | 252.0 | 418.4 | 26.11% | 5 |
-| cpp | 4000 | 120000 | 4000.0 | 159.0 | 160.8 | 242.6 | 251.3 | 332.0 | 21.60% | 0 |
-| python-default | 1000 | 20000 | 1000.0 | 166.6 | 170.7 | 267.6 | 1005.2 | 1082.7 | 6.58% | 0 |
-| cpp-default | 1000 | 20000 | 1000.0 | 159.1 | 161.3 | 191.8 | 1002.2 | 1037.0 | 5.41% | 0 |
+| Client         | Target Hz | Cycles | Effective Hz | Mean SPI | p99 SPI | Max SPI | p99 dt | Max dt |    CPU | Skipped releases |
+| -------------- | --------: | -----: | -----------: | -------: | ------: | ------: | -----: | -----: | -----: | ---------------: |
+| python         |      4000 | 120000 |       3999.9 |    166.3 |   168.8 |   330.5 |  252.0 |  418.4 | 26.11% |                5 |
+| cpp            |      4000 | 120000 |       4000.0 |    159.0 |   160.8 |   242.6 |  251.3 |  332.0 | 21.60% |                0 |
+| python-default |      1000 |  20000 |       1000.0 |    166.6 |   170.7 |   267.6 | 1005.2 | 1082.7 |  6.58% |                0 |
+| cpp-default    |      1000 |  20000 |       1000.0 |    159.1 |   161.3 |   191.8 | 1002.2 | 1037.0 |  5.41% |                0 |
 
 At 4 kHz Python had five SPI-call sums exceeding 250 µs; C++ had none. The reported
 skip totals were Python 1/1/3 and C++ 0/0/0 across repetitions. The ordinary target
@@ -1853,12 +1856,12 @@ Times are µs; percentiles pool individual samples across three runs. CPU is the
 mean percentage of one core. Skips are missed scheduled releases, not a count of
 all completion intervals longer than their target.
 
-| Rate | Client | Mean SPI | p99 SPI | Max SPI | Mean dt | p99 dt | Max dt | CPU | Skipped releases |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2000 Hz | python | 166.9 | 174.8 | 454.3 | 500.0 | 505.5 | 973.6 | 13.23% | 1 |
-| 2000 Hz | cpp | 159.0 | 161.3 | 227.6 | 500.0 | 502.2 | 554.5 | 10.80% | 0 |
-| 1000 Hz | python | 166.7 | 172.8 | 288.5 | 1000.0 | 1006.8 | 1143.9 | 6.59% | 0 |
-| 1000 Hz | cpp | 159.1 | 161.1 | 178.8 | 1000.0 | 1002.2 | 1016.8 | 5.42% | 0 |
+| Rate    | Client | Mean SPI | p99 SPI | Max SPI | Mean dt | p99 dt | Max dt |    CPU | Skipped releases |
+| ------- | ------ | -------: | ------: | ------: | ------: | -----: | -----: | -----: | ---------------: |
+| 2000 Hz | python |    166.9 |   174.8 |   454.3 |   500.0 |  505.5 |  973.6 | 13.23% |                1 |
+| 2000 Hz | cpp    |    159.0 |   161.3 |   227.6 |   500.0 |  502.2 |  554.5 | 10.80% |                0 |
+| 1000 Hz | python |    166.7 |   172.8 |   288.5 |  1000.0 | 1006.8 | 1143.9 |  6.59% |                0 |
+| 1000 Hz | cpp    |    159.1 |   161.1 |   178.8 |  1000.0 | 1002.2 | 1016.8 |  5.42% |                0 |
 
 C++ had zero skipped releases at both rates. Its maximum completion interval
 exceeded the target by 54.5 µs (10.9%) at 2 kHz and 16.8 µs (1.68%) at 1 kHz.
@@ -1971,12 +1974,12 @@ constitute physical control validation.
 Times below are µs. SPI includes software overhead and NSS waits; CPU is percent
 of one core. These are single finite runs per configuration, not worst-case bounds.
 
-| Client | Exchanges/cycle | Mean SPI | p99 SPI | Max SPI | p99 dt | Max dt | CPU |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| C++ before | 2 | 159.8 | 161.4 | 182.8 | 1001.8 | 1016.8 | 5.49% |
-| C++ after | 1 | 62.1 | 64.5 | 93.9 | 1001.9 | 1039.1 | 1.24% |
-| Python before | 2 | 167.0 | 170.8 | 256.1 | 1003.8 | 1035.9 | 6.60% |
-| Python after | 1 | 71.5 | 74.2 | 850.9 | 1002.9 | 1823.8 | 2.56% |
+| Client        | Exchanges/cycle | Mean SPI | p99 SPI | Max SPI | p99 dt | Max dt |   CPU |
+| ------------- | --------------: | -------: | ------: | ------: | -----: | -----: | ----: |
+| C++ before    |               2 |    159.8 |   161.4 |   182.8 | 1001.8 | 1016.8 | 5.49% |
+| C++ after     |               1 |     62.1 |    64.5 |    93.9 | 1001.9 | 1039.1 | 1.24% |
+| Python before |               2 |    167.0 |   170.8 |   256.1 | 1003.8 | 1035.9 | 6.60% |
+| Python after  |               1 |     71.5 |    74.2 |   850.9 | 1002.9 | 1823.8 | 2.56% |
 
 Average communication cost fell about 61% in C++ and 57% in Python. Python had a
 large isolated timing excursion despite the improved mean/p99; zero skips does
@@ -2021,3 +2024,57 @@ needed because production code is unchanged from the hardware-tested version.
 The existing timing excursions, lack of command acknowledgement, variable feedback
 delay after skipped releases, and absence of physical motor/MPC validation remain
 explicit limits of this communication baseline.
+
+<a id="pi-laptop-comparison"></a>
+
+## Five-minute Pi 5 and laptop comparison — 2026-11-27
+
+Both C++ hosts completed 300,000 exchanges on the same NUCLEO-F446RE at a 1 kHz
+target with FIFO priority 50. The runs sent zero setpoint with motor enable off.
+The Pi used native SPI, CPU 3 with core isolation, and a requested 30 MHz SPI
+clock. It ran a temporary build of `main` at `753bdf5` with the duration set
+to 300 seconds and the commands kept disabled. The Ubuntu laptop ran unpinned
+with a Waveshare CH347T at 15 MHz SPI, using the transport now in `waveshare`
+at `91e6efb`. For the laptop run, the Pi powered the Nucleo over ST-LINK USB
+and its SPI leads were disconnected. The CH347T was the SPI master.
+
+| Metric                         |   Pi 5 native SPI |      Laptop CH347T |
+| ------------------------------ | ----------------: | -----------------: |
+| Valid replies                  |           300,000 |            300,000 |
+| Skipped releases               |                 0 |                  9 |
+| Completion interval p99.9      |         1.0023 ms |          1.1536 ms |
+| Completion interval p99.99     |         1.0091 ms |          1.2679 ms |
+| Completion intervals over 2 ms |                 0 |                  4 |
+| Longest completion interval    |         1.0217 ms |          5.7029 ms |
+| Mean SPI call                  |           62.1 µs |           241.6 µs |
+| Longest SPI call               |           88.6 µs |         4,920.2 µs |
+| Process CPU usage              | 1.23% of one core | 15.88% of one core |
+
+The laptop's longest interval occurred at cycle 237,494. Its SPI call took
+4.9202 ms of that 5.7029 ms interval. The call includes USB transfers and time
+waiting to resume on the host, so the measurement leaves the delay source
+unresolved. The Pi's mean exchange took about 180 µs less. These results
+compare the two setups as used. The machines, transports, SPI clock settings,
+and CPU placement differ. Each result covers one finite disabled run.
+
+The Pi remains the reference for controller timing. The laptop passed
+communication on the tested wiring. A direct replacement remains unverified,
+including powered motor control, the MPC workload, and worst-case feedback
+latency. Two temporary laptop experiments, relying on the bridge's setup
+delay alone and queuing USB receive early, gave no consistent improvement
+in the timing tails under normal scheduling.
+
+For the next laptop timing test, retain unpinned FIFO 50, the tested power and
+ground wiring, and 15 MHz SPI. Correlate the host's chip-select, USB write,
+and USB receive timings with USB request submission and completion events
+under FIFO. This can distinguish time with a request outstanding from time
+the host takes to resume. Compare repeated five-minute runs using skipped
+releases, p99.99, and the count of gaps over 2 ms. If the USB round trips
+dominate, an adapter that handles chip-select assertion, the setup interval,
+the full-duplex burst, and release in one operation is worth testing. At
+15 MHz the 18-byte burst takes about 9.6 µs on the wire.
+
+Temporary artifacts are on the Pi at
+`/tmp/mpc-pi-five-minute.ujPlkY/run.aI9ZX8/` (`timing.csv`, `stderr.txt`,
+and `summary.txt`) and on the laptop at `/tmp/mpc-five-minute.w6xhw0/fifo.csv`.
+The laptop setup and FIFO commands are in `docs/LAPTOP_HOST.md` on `waveshare`.
